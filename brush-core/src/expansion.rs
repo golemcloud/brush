@@ -1241,10 +1241,20 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
         };
 
         // On error (e.g. malformed pattern), default to NoGlob so the field
-        // passes through as a literal rather than triggering failglob.
-        let expansion = pattern
-            .expand(self.shell.working_dir(), Some(&keep), &options)
-            .unwrap_or_default();
+        // passes through as a literal rather than triggering failglob. A pattern nested too
+        // deeply to match fails instead, since bash would match it.
+        let expansion = match pattern.expand(self.shell.working_dir(), Some(&keep), &options) {
+            Ok(expansion) => expansion,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    error::ErrorKind::WordParseError(brush_parser::WordParseError::NestedTooDeeply)
+                ) =>
+            {
+                return Err(error);
+            }
+            Err(_) => patterns::PatternExpansionResult::default(),
+        };
 
         if expansion.is_unmatched_glob()
             && self.shell.options().fail_expansion_on_globs_without_match

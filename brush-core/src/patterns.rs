@@ -574,26 +574,45 @@ impl Pattern {
 /// pathname expansion. Delegates to the pattern parser's grammar, which is
 /// the single source of truth for what constitutes a glob metacharacter.
 /// Everything below `dir` (directories only when `directories_only`), not following symbolic
-/// links and skipping dot files unless `allow_dot_files`, as bash's `globstar` walks.
+/// links and skipping dot files unless `allow_dot_files`, as bash's `globstar` walks. The walk
+/// keeps its own stack, so a tree of any depth is walked; each directory is read in full before
+/// the walk goes below it, so none stays open.
 fn walk_for_globstar(
     dir: &Path,
     directories_only: bool,
     allow_dot_files: bool,
     found: &mut Vec<PathBuf>,
 ) {
-    let Ok(entries) = dir.read_dir() else {
-        return;
+    // The entries of each directory on the way down, and whether each is a directory.
+    let read = |dir: &Path| -> std::vec::IntoIter<(PathBuf, bool)> {
+        dir.read_dir()
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        allow_dot_files || !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                    .map(|entry| {
+                        let is_dir = entry.file_type().is_ok_and(|file_type| file_type.is_dir());
+                        (entry.path(), is_dir)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
     };
-    for entry in entries.filter_map(Result::ok) {
-        if !allow_dot_files && entry.file_name().to_string_lossy().starts_with('.') {
+    let mut pending = vec![read(dir)];
+    while let Some(entries) = pending.last_mut() {
+        let Some((path, is_dir)) = entries.next() else {
+            pending.pop();
             continue;
-        }
-        let is_dir = entry.file_type().is_ok_and(|file_type| file_type.is_dir());
-        if is_dir || !directories_only {
-            found.push(entry.path());
-        }
+        };
         if is_dir {
-            walk_for_globstar(&entry.path(), directories_only, allow_dot_files, found);
+            let below = read(&path);
+            found.push(path);
+            pending.push(below);
+        } else if !directories_only {
+            found.push(path);
         }
     }
 }
@@ -1213,6 +1232,45 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn globstar_walks_a_tree_in_order_without_recursing() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let root = scratch.path();
+        // Deep enough that a walk recursing once per level would exhaust a small stack, and
+        // short enough for any host's path limit.
+        let mut deep = root.join("z");
+        for _ in 0..100 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep)?;
+        std::fs::create_dir_all(root.join("a/b"))?;
+        std::fs::write(root.join("a/f"), "")?;
+        std::fs::write(root.join("a/.hidden"), "")?;
+
+        let walk = |directories_only, allow_dot_files| {
+            let mut found = vec![];
+            walk_for_globstar(root, directories_only, allow_dot_files, &mut found);
+            let mut found: Vec<String> = found
+                .iter()
+                .filter_map(|path| path.strip_prefix(root).ok())
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            found.sort();
+            found
+        };
+        let everything = walk(false, false);
+        assert_eq!(everything.len(), 3 + 101);
+        assert!(everything.starts_with(&["a".into(), "a/b".into(), "a/f".into()]));
+        assert!(everything.contains(&"z".to_owned()));
+        assert_eq!(
+            everything.last(),
+            Some(&std::format!("z{}", "/d".repeat(100)))
+        );
+        assert_eq!(walk(true, false).len(), 2 + 101);
+        assert!(walk(false, true).contains(&"a/.hidden".to_owned()));
         Ok(())
     }
 

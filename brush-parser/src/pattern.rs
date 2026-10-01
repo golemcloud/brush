@@ -26,9 +26,31 @@ pub fn pattern_to_regex_str(
     pattern: &str,
     enable_extended_globbing: bool,
 ) -> Result<String, error::WordParseError> {
-    let regex_str = pattern_to_regex_translator::pattern(pattern, enable_extended_globbing)
-        .map_err(|e| error::WordParseError::Pattern(e.into()))?;
-    Ok(regex_str)
+    let limits = Limits::default();
+    let regex_str =
+        pattern_to_regex_translator::pattern(pattern, enable_extended_globbing, &limits);
+    if limits.exceeded.get() {
+        return Err(error::WordParseError::NestedTooDeeply);
+    }
+    regex_str.map_err(|e| error::WordParseError::Pattern(e.into()))
+}
+
+/// How deeply extended globs may nest. Translating one recurses once per level, and each level
+/// nests the regular expression one or two groups deeper, which the regex engine bounds.
+const MAX_EXTGLOB_NESTING: usize = 24;
+
+/// The most text the negated extended globs of one pattern may translate their bodies to,
+/// together. `!(p)` holds `p`'s regular expression twice, so nesting negations doubles the
+/// translation at each level.
+const MAX_NEGATED_BODY_BYTES: usize = 512 * 1024;
+
+/// What translating one pattern has used of its limits.
+#[derive(Default)]
+struct Limits {
+    /// Whether the pattern nests deeper, or negates more text, than a pattern may.
+    exceeded: std::cell::Cell<bool>,
+    /// The text the pattern's negated extended globs have translated their bodies to so far.
+    negated_bytes: std::cell::Cell<usize>,
 }
 
 /// Formats a range between two bracket expression members, returning `None` if the
@@ -45,16 +67,16 @@ fn bracket_range(from: (String, char), to: (String, char)) -> Option<String> {
 }
 
 peg::parser! {
-    grammar pattern_to_regex_translator(enable_extended_globbing: bool) for str {
+    grammar pattern_to_regex_translator<'a>(enable_extended_globbing: bool, limits: &'a Limits) for str {
         pub(crate) rule pattern() -> String =
-            pieces:(pattern_piece()*) {
+            pieces:(pattern_piece(0)*) {
                 pieces.join("")
             }
 
-        rule pattern_piece() -> String =
+        rule pattern_piece(depth: usize) -> String =
             escape_sequence() /
             bracket_expression() /
-            extglob_enabled() s:extended_glob_pattern() { s } /
+            extglob_enabled() s:extended_glob_pattern(depth) { s } /
             wildcard() /
             [c if regex_char_needs_escaping(c)] {
                 let mut s = '\\'.to_string();
@@ -165,17 +187,24 @@ peg::parser! {
         rule extglob_enabled() -> () =
             &[_] {? if enable_extended_globbing { Ok(()) } else { Err("extglob disabled") } }
 
-        pub(crate) rule extended_glob_pattern() -> String =
-            kind:extended_glob_prefix() "(" body_nullable:&(n:(nullable_pieces() ** "|") { n.into_iter().any(|n| n) }) branches:extended_glob_body() ")" {
+        pub(crate) rule extended_glob_pattern(depth: usize) -> String =
+            kind:extended_glob_prefix() "(" nested(depth) body_nullable:&(n:(nullable_pieces(depth + 1) ** "|") { n.into_iter().any(|n| n) }) branches:extended_glob_body(depth + 1) ")" {?
                 let mut s = String::new();
 
                 // fancy_regex uses ?! to indicate a negative lookahead.
                 if matches!(kind, ExtendedGlobKind::Exclamation) {
                     if !branches.is_empty() {
+                        let body = branches.join("|");
+                        let negated_bytes = limits.negated_bytes.get() + body.len();
+                        if negated_bytes > MAX_NEGATED_BODY_BYTES {
+                            limits.exceeded.set(true);
+                            return Err("a smaller negated pattern");
+                        }
+                        limits.negated_bytes.set(negated_bytes);
                         s.push_str("(?:(?!");
-                        s.push_str(&branches.join("|"));
+                        s.push_str(&body);
                         s.push_str(").*|(?>");
-                        s.push_str(&branches.join("|"));
+                        s.push_str(&body);
                         s.push_str(").+?");
                         // The empty string, unless the inner pattern matches it (`!(*)`).
                         if !body_nullable {
@@ -198,7 +227,18 @@ peg::parser! {
                     }
                 }
 
-                s
+                Ok(s)
+            }
+
+        // Past the nesting an extended glob may have, fails and marks the pattern as too deep.
+        rule nested(depth: usize) =
+            "" {?
+                if depth < MAX_EXTGLOB_NESTING && !limits.exceeded.get() {
+                    Ok(())
+                } else {
+                    limits.exceeded.set(true);
+                    Err("shallower nesting")
+                }
             }
 
         rule extended_glob_prefix() -> ExtendedGlobKind =
@@ -208,33 +248,33 @@ peg::parser! {
             "?" { ExtendedGlobKind::Question } /
             "*" { ExtendedGlobKind::Star }
 
-        pub(crate) rule extended_glob_body() -> Vec<String> =
+        pub(crate) rule extended_glob_body(depth: usize) -> Vec<String> =
             // Cover case with *no* branches.
             &[')'] { vec![] } /
             // Otherwise, look for branches separated by '|'.
-            extended_glob_branch() ** "|"
+            extended_glob_branch(depth) ** "|"
 
-        rule extended_glob_branch() -> String =
+        rule extended_glob_branch(depth: usize) -> String =
             // Cover case of empty branch.
             &['|' | ')'] { String::new() } /
-            pieces:(!['|' | ')'] piece:pattern_piece() { piece })+ {
+            pieces:(!['|' | ')'] piece:pattern_piece(depth) { piece })+ {
                 pieces.join("")
             }
 
         // Whether the pieces of a pattern, up to the `|` or `)` that ends an extglob branch, can
         // match the empty string.
-        rule nullable_pieces() -> bool =
-            n:(!['|' | ')'] n:nullable_piece() { n })* { n.into_iter().all(|n| n) }
+        rule nullable_pieces(depth: usize) -> bool =
+            n:(!['|' | ')'] n:nullable_piece(depth) { n })* { n.into_iter().all(|n| n) }
 
-        rule nullable_piece() -> bool =
+        rule nullable_piece(depth: usize) -> bool =
             escape_sequence() { false } /
             bracket_expression() { false } /
-            extglob_enabled() n:nullable_extended_glob() { n } /
+            extglob_enabled() n:nullable_extended_glob(depth) { n } /
             "*" { true } /
             [_] { false }
 
-        rule nullable_extended_glob() -> bool =
-            kind:extended_glob_prefix() "(" n:(nullable_pieces() ** "|") ")" {
+        rule nullable_extended_glob(depth: usize) -> bool =
+            kind:extended_glob_prefix() "(" nested(depth) n:(nullable_pieces(depth + 1) ** "|") ")" {
                 let any = n.into_iter().any(|n| n);
                 match kind {
                     ExtendedGlobKind::Star | ExtendedGlobKind::Question => true,
@@ -246,7 +286,7 @@ peg::parser! {
         // A glob metacharacter construct: wildcard, bracket expression, or extglob.
         rule glob_piece() =
             bracket_expression() /
-            extglob_enabled() extended_glob_pattern() /
+            extglob_enabled() extended_glob_pattern(0) /
             wildcard()
 
         // A non-glob piece: an escape sequence or any character not starting a glob.
@@ -273,8 +313,15 @@ peg::parser! {
 /// * `pattern` - The shell pattern to check.
 /// * `enable_extended_globbing` - Whether to enable extended globbing (extglob).
 pub fn pattern_has_glob_metacharacters(pattern: &str, enable_extended_globbing: bool) -> bool {
-    pattern_to_regex_translator::has_glob_metacharacters(pattern, enable_extended_globbing)
-        .unwrap_or(false)
+    let limits = Limits::default();
+    let found = pattern_to_regex_translator::has_glob_metacharacters(
+        pattern,
+        enable_extended_globbing,
+        &limits,
+    )
+    .unwrap_or(false);
+    // A pattern nested too deeply to tell is one, so that translating it reports why it fails.
+    found || limits.exceeded.get()
 }
 
 /// Returns whether or not a given character needs to be escaped in a regular expression.
@@ -367,37 +414,67 @@ mod tests {
 
     #[test]
     fn test_extended_glob() -> Result<()> {
-        assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("@(a|b)", true)?,
-            "(a|b)"
-        );
-
-        assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("@(|a)", true)?,
-            "(|a)"
-        );
-
-        assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("@(|)", true)?,
-            "(|)"
-        );
-
-        assert_eq!(
-            pattern_to_regex_translator::extended_glob_body("ab|ac", true)?,
-            vec!["ab", "ac"],
-        );
-
-        assert_eq!(
-            pattern_to_regex_translator::extended_glob_pattern("*(ab|ac)", true)?,
-            "(ab|ac)*"
-        );
-
-        assert_eq!(
-            pattern_to_regex_translator::extended_glob_body("", true)?,
-            Vec::<String>::new(),
-        );
+        let limits = Limits::default();
+        let pattern =
+            |text| pattern_to_regex_translator::extended_glob_pattern(text, true, &limits, 0);
+        let body = |text| pattern_to_regex_translator::extended_glob_body(text, true, &limits, 0);
+        assert_eq!(pattern("@(a|b)")?, "(a|b)");
+        assert_eq!(pattern("@(|a)")?, "(|a)");
+        assert_eq!(pattern("@(|)")?, "(|)");
+        assert_eq!(body("ab|ac")?, vec!["ab", "ac"]);
+        assert_eq!(pattern("*(ab|ac)")?, "(ab|ac)*");
+        assert_eq!(body("")?, Vec::<String>::new());
+        assert!(!limits.exceeded.get());
 
         Ok(())
+    }
+
+    #[test]
+    fn extended_globs_nest_up_to_the_limit() {
+        let nested = |kind: &str, depth: usize| {
+            std::format!(
+                "{}a{}",
+                std::format!("{kind}(").repeat(depth),
+                ")".repeat(depth)
+            )
+        };
+        for kind in ["@", "!", "+", "?", "*"] {
+            // Nested negations reach the limit on their translation first (see below).
+            let deepest = if kind == "!" { 12 } else { MAX_EXTGLOB_NESTING };
+            let pattern = nested(kind, deepest);
+            assert!(pattern_to_regex_str(&pattern, true).is_ok(), "{pattern}");
+            // Deeper fails, however deep, without recursing further; so does telling whether
+            // it is a pattern at all.
+            for depth in [MAX_EXTGLOB_NESTING + 1, 10_000] {
+                let pattern = nested(kind, depth);
+                assert!(matches!(
+                    pattern_to_regex_str(&pattern, true),
+                    Err(error::WordParseError::NestedTooDeeply)
+                ));
+                assert!(pattern_has_glob_metacharacters(&pattern, true));
+            }
+            // Without extglob, the text is not a pattern to nest.
+            assert!(pattern_to_regex_str(&nested(kind, 10_000), false).is_ok());
+        }
+    }
+
+    #[test]
+    fn nested_negations_stop_before_their_translation_explodes() {
+        // Each `!( )` holds its body twice, so twenty levels would take 2^20 times the text.
+        let pattern = std::format!("{}abcdefgh{}", "!(".repeat(20), ")".repeat(20));
+        assert!(matches!(
+            pattern_to_regex_str(&pattern, true),
+            Err(error::WordParseError::NestedTooDeeply)
+        ));
+        let pattern = std::format!("{}abcdefgh{}", "!(".repeat(8), ")".repeat(8));
+        assert!(pattern_to_regex_str(&pattern, true).is_ok());
+        // Nor does a pattern of many negations, each within the limit, add up past it.
+        let negation = std::format!("{}abcdefgh{}", "!(".repeat(10), ")".repeat(10));
+        assert!(pattern_to_regex_str(&negation, true).is_ok());
+        assert!(matches!(
+            pattern_to_regex_str(&negation.repeat(1000), true),
+            Err(error::WordParseError::NestedTooDeeply)
+        ));
     }
 
     #[test]
