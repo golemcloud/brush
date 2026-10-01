@@ -1204,6 +1204,10 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 ) -> Result<String, error::Error> {
     // Instantiate a subshell to run the command in.
     let mut subshell = shell.clone();
+    let last_background_pid = subshell.last_background_pid();
+    subshell
+        .jobs_mut()
+        .keep_for_substitution(last_background_pid);
     #[cfg(target_arch = "wasm32")]
     subshell.traps_mut().reset_pipe_for_subshell();
     // It runs only an EXIT trap it sets itself, when it ends.

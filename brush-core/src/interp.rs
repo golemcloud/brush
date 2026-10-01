@@ -854,6 +854,16 @@ fn spawn_async_ao_list_in_task<'a, SE: extensions::ShellExtensions>(
     ))
 }
 
+/// Whether a pipeline stage is the `jobs` builtin, the only stage that lists the jobs of the shell
+/// that started it: bash starts every other stage, a function or compound command included,
+/// without them.
+fn stage_runs_jobs(command: &ast::Command) -> bool {
+    matches!(
+        command,
+        ast::Command::Simple(ast::SimpleCommand { word_or_name: Some(name), .. }) if name.value == "jobs"
+    )
+}
+
 /// Whether a pipeline stage adds no subshell level (`BASH_SUBSHELL`) of its own, as in bash: a
 /// simple command runs in the stage's process as it is, and a `( list )` is the stage's subshell.
 const fn stage_adds_no_subshell(command: &ast::Command) -> bool {
@@ -1248,6 +1258,9 @@ async fn spawn_pipeline_processes(
             if stage_adds_no_subshell(command) {
                 stage_shell.subshell_level = shell.subshell_level;
             }
+            if !stage_runs_jobs(command) {
+                stage_shell.jobs_mut().jobs.clear();
+            }
             PipelineExecutionContext {
                 shell: commands::ShellForCommand::OwnedShell {
                     target: Box::new(stage_shell),
@@ -1359,6 +1372,9 @@ fn spawn_pipeline_stage<SE: extensions::ShellExtensions>(
     shell.traps_mut().reset_pipe_for_subshell();
     // A stage is a subshell: it runs only an EXIT trap it sets itself, when it ends.
     shell.traps_mut().reset_exit_for_subshell();
+    if !stage_runs_jobs(&command) {
+        shell.jobs_mut().jobs.clear();
+    }
     // It is a process of its own, with its own `$BASHPID`: a background pipeline registered its
     // stages already.
     let numbered = match numbered {
@@ -4345,6 +4361,10 @@ async fn setup_process_substitution(
     // TODO(execute): Don't execute synchronously!
     // Execute in a subshell, read one xtrace level deeper, as bash does.
     let mut subshell = shell.clone();
+    let last_background_pid = subshell.last_background_pid();
+    subshell
+        .jobs_mut()
+        .keep_for_substitution(last_background_pid);
     subshell.trace_level += 1;
     number_substitution_list(&mut subshell, &subshell_cmd.list);
 
@@ -4695,6 +4715,10 @@ async fn run_substitution_list(
     params: &ExecutionParameters,
 ) {
     let mut subshell = shell.clone();
+    let last_background_pid = subshell.last_background_pid();
+    subshell
+        .jobs_mut()
+        .keep_for_substitution(last_background_pid);
     subshell.traps_mut().reset_pipe_for_subshell();
     subshell.traps_mut().reset_exit_for_subshell();
     subshell.loop_depth = 0;

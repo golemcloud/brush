@@ -304,7 +304,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
             env: self.env.clone(),
             funcs: self.funcs.clone(),
             options: self.options.clone(),
-            jobs: self.jobs.listing_copy(),
+            jobs: self.jobs.listing_copy(&self.processes),
             aliases: self.aliases.clone(),
             last_exit_status: self.last_exit_status,
             last_exit_status_change_count: self.last_exit_status_change_count,

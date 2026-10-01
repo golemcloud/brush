@@ -187,12 +187,106 @@ impl JobManager {
     }
 
     /// The table a pipeline stage or command substitution starts with: its parent's jobs, to
-    /// list only, as bash lists them there.
-    pub(crate) fn listing_copy(&self) -> Self {
+    /// list only, as bash lists them there. A job whose process has ended by then is listed as
+    /// ended, as bash's parent has reaped it before it starts the subshell.
+    pub(crate) fn listing_copy(&self, processes: &crate::process_table::ProcessTable) -> Self {
         Self {
-            jobs: self.jobs.iter().map(Job::listing_copy).collect(),
+            jobs: self
+                .jobs
+                .iter()
+                .map(|job| job.listing_copy(processes))
+                .collect(),
             disowned: Vec::new(),
             reaped: VecDeque::new(),
+        }
+    }
+
+    /// Leaves out of a command or process substitution's copy of its parent's jobs those that
+    /// had ended when it started, as bash's does, but the last one started in the background
+    /// (`last_background_pid`, `$!`), which bash keeps until its status is reported. The current
+    /// and previous jobs are chosen again if either left, as bash's `reset_current` does.
+    pub(crate) fn keep_for_substitution(
+        &mut self,
+        last_background_pid: Option<sys::process::ProcessId>,
+    ) {
+        let mut marked_left = false;
+        self.jobs.retain(|job| {
+            let ended = matches!(job.state, JobState::Done)
+                && job.representative_pid() != last_background_pid;
+            marked_left |= ended && !matches!(job.annotation, JobAnnotation::None);
+            !ended
+        });
+        if marked_left {
+            self.reset_current();
+        }
+    }
+
+    /// Chooses the current and previous jobs again, as bash's `reset_current` does: the current
+    /// job if it is stopped, else the previous one if it is, else the newest stopped job, else the
+    /// newest running one becomes current. The previous job is the former current one if that
+    /// is stopped, else the newest stopped job older than a stopped current job, else the newest
+    /// running job (older than the current job when that runs), else the current job itself.
+    fn reset_current(&mut self) {
+        let marked = |annotation: fn(&JobAnnotation) -> bool| {
+            self.jobs
+                .iter()
+                .find(|job| annotation(&job.annotation))
+                .map(|job| job.id)
+        };
+        let old_current = marked(|annotation| matches!(annotation, JobAnnotation::Current));
+        let old_previous = marked(|annotation| matches!(annotation, JobAnnotation::Previous));
+        let state_of = |id: usize| {
+            self.jobs
+                .iter()
+                .find(|job| job.id == id)
+                .map(|job| job.state.clone())
+        };
+        let stopped = |id: &usize| matches!(state_of(*id), Some(JobState::Stopped));
+        // The newest running (or else stopped) job older than job `below`.
+        let newest = |below: usize, running: bool| {
+            self.jobs
+                .iter()
+                .filter(|job| job.id < below)
+                .filter(|job| match job.state {
+                    JobState::Running => running,
+                    JobState::Stopped => !running,
+                    JobState::Done | JobState::Unknown => false,
+                })
+                .map(|job| job.id)
+                .max()
+        };
+
+        let current = old_current
+            .filter(stopped)
+            .or_else(|| old_previous.filter(stopped))
+            .or_else(|| newest(usize::MAX, false))
+            .or_else(|| newest(usize::MAX, true));
+        let previous = current.map(|current| {
+            let former = if old_current == Some(current) {
+                old_previous
+            } else {
+                old_current
+            };
+            former
+                .filter(|former| *former != current && stopped(former))
+                .or_else(|| newest(current, false).filter(|_| stopped(&current)))
+                .or_else(|| {
+                    if matches!(state_of(current), Some(JobState::Running)) {
+                        newest(current, true)
+                    } else {
+                        newest(usize::MAX, true)
+                    }
+                })
+                .unwrap_or(current)
+        });
+        for job in &mut self.jobs {
+            job.annotation = if Some(job.id) == current {
+                JobAnnotation::Current
+            } else if Some(job.id) == previous {
+                JobAnnotation::Previous
+            } else {
+                JobAnnotation::None
+            };
         }
     }
 
@@ -739,9 +833,10 @@ impl Job {
         self.listed = true;
     }
 
-    /// A copy of this job for listing only (see `listing_only`).
-    fn listing_copy(&self) -> Self {
-        Self {
+    /// A copy of this job for listing only (see `listing_only`), in the state its process is in
+    /// now: a job this shell has not polled since it ended is copied as ended.
+    fn listing_copy(&self, processes: &crate::process_table::ProcessTable) -> Self {
+        let mut copy = Self {
             tasks: VecDeque::new(),
             pgid: self.pgid,
             annotation: self.annotation.clone(),
@@ -756,7 +851,23 @@ impl Job {
             leader: self.leader,
             pids: self.pids.clone(),
             listing_only: true,
+        };
+        if let (JobState::Running, Some(leader)) = (&self.state, self.leader) {
+            use crate::process_table::ProcessStatus;
+            // A finished process keeps its entry only for a while; without one it ended long ago.
+            let final_status = match processes.entry(leader).map(|entry| entry.status) {
+                Some(ProcessStatus::Running) => return copy,
+                Some(ProcessStatus::Exited(code)) => Some((code, None)),
+                Some(ProcessStatus::Signaled(signal)) => {
+                    Some((128_u8.saturating_add(signal), Some(signal)))
+                }
+                None => None,
+            };
+            copy.state = JobState::Done;
+            copy.final_status = final_status;
+            copy.listed = false;
         }
+        copy
     }
 
     /// Returns a running job whose work runs as numbered process `leader`.
@@ -1050,5 +1161,69 @@ mod tests {
                 assert!(polls <= 3, "polled {polls} times");
                 assert!(matches!(job.state, JobState::Done));
             }));
+    }
+
+    #[test]
+    fn a_listing_copy_shows_the_jobs_whose_process_ended_as_ended() {
+        use crate::process_table::{ProcessStatus, ProcessTable};
+        let table = ProcessTable::new(1, 2);
+        let mut manager = JobManager::new();
+        for (command, status) in [
+            ("running", None),
+            ("exited", Some(ProcessStatus::Exited(3))),
+            ("killed", Some(ProcessStatus::Signaled(15))),
+        ] {
+            let leader = table.allocate_job(1, command.into());
+            if let Some(status) = status {
+                table.set_status(leader, status);
+            }
+            let mut job = Job::new([], command.into(), JobState::Running);
+            job.leader = Some(leader);
+            manager.add_as_current(job);
+        }
+        let copy = manager.listing_copy(&table);
+        let listed: Vec<String> = copy.jobs.iter().map(Job::status_text).collect();
+        assert_eq!(listed, ["Running", "Exit 3", "Terminated"]);
+        // The shell's own table still has them to report.
+        assert!(
+            manager
+                .jobs
+                .iter()
+                .all(|job| matches!(job.state, JobState::Running))
+        );
+    }
+
+    #[test]
+    fn a_substitution_keeps_the_running_jobs_and_the_last_one_started() {
+        use JobState::{Done, Running, Stopped};
+        // Jobs by state, the last one started being `$!`; then the jobs kept and their marks.
+        let keep = |states: &[JobState]| {
+            let mut manager = JobManager::new();
+            for (index, state) in states.iter().enumerate() {
+                let mut job = Job::new([], std::format!("job{}", index + 1), state.clone());
+                job.pids = vec![i32::try_from(index).unwrap() + 100];
+                manager.add_as_current(job);
+            }
+            let last = manager.jobs.last().and_then(Job::representative_pid);
+            manager.keep_for_substitution(last);
+            manager
+                .jobs
+                .iter()
+                .map(|job| std::format!("{}{}", job.id, job.annotation))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // As bash lists them in `$(jobs)`: no job is left to be current or previous.
+        assert_eq!(keep(&[Done, Done]), "2 ");
+        // An ended job without a mark leaves the marks as they were.
+        assert_eq!(keep(&[Running, Done, Running, Done]), "1  3- 4+");
+        // The previous job ended: the newest running job becomes current, and is also previous
+        // with no older one running.
+        assert_eq!(keep(&[Running, Done, Done]), "1+ 3 ");
+        assert_eq!(keep(&[Running, Running, Done, Done]), "1- 2+ 4 ");
+        // A stopped job is chosen first.
+        assert_eq!(keep(&[Stopped, Running, Done, Done]), "1+ 2- 4 ");
+        // Nothing ended: nothing changes.
+        assert_eq!(keep(&[Running, Running]), "1- 2+");
     }
 }
