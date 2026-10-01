@@ -1385,6 +1385,10 @@ fn spawn_pipeline_stage<SE: extensions::ShellExtensions>(
         None => subshell_process(&mut shell),
     };
     services.spawn(async move {
+        // A stage starts with a whole turn, as a new process starts with a whole time slice: a
+        // short stage that writes less than a pipe holds finishes before the stage reading it
+        // runs, as in bash (`for i in 1 2 3; do echo $i; done | head -n 1` gets no SIGPIPE).
+        COMMANDS_SINCE_TURN.with(|count| count.set(0));
         let completed = std::cell::Cell::new(false);
         let body = async {
             let context = PipelineExecutionContext {

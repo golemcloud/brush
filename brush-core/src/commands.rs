@@ -929,8 +929,12 @@ async fn execute_wasm_builtin<SE: extensions::ShellExtensions>(
     )
     .await;
 
-    // Default SIGPIPE is observed by the enclosing process before anything else executes.
-    (services.yield_now)().await;
+    // A signal the builtin raised (`kill $$`, a default SIGPIPE) acts before anything else
+    // executes. Otherwise the process keeps its turn, as a process runs on until it blocks, so
+    // `echo` in a loop whose output fits the pipe finishes before `| head -n 1` exits, as in bash.
+    if result.is_err() || process::signal_awaits_turn() {
+        (services.yield_now)().await;
+    }
     if let Err(error) = &result {
         if error
             .as_io_error()

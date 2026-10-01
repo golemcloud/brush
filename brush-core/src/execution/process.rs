@@ -697,6 +697,19 @@ pub fn process_terminating(table: &ProcessTable, pid: Pid) -> bool {
     lookup(table, pid).is_some_and(|state| state.terminated.get().is_some())
 }
 
+/// Whether a signal has ended or stopped the running process, or one it runs inside, and acts
+/// only once that process gives up its turn.
+pub(crate) fn signal_awaits_turn() -> bool {
+    let mut process = current();
+    while let Some(state) = process {
+        if state.terminated.get().is_some() || state.stopped.get() {
+            return true;
+        }
+        process = state.parent.upgrade();
+    }
+    false
+}
+
 /// Whether execution is currently inside an owned logical process.
 pub(crate) fn is_active() -> bool {
     current().is_some()
@@ -1012,6 +1025,39 @@ mod tests {
                 table.entry(ignored).unwrap().status,
                 ProcessStatus::Exited(7)
             );
+        });
+    }
+
+    #[test]
+    fn a_signal_to_the_running_process_or_its_parent_awaits_its_turn() {
+        run(async {
+            let table = ProcessTable::new(10, 11);
+            let parent = table.allocate(10, "parent".into());
+            let result = run_numbered_process(&table, parent, Dispositions::default(), async {
+                assert!(!signal_awaits_turn());
+                let result = run_process(PipeDisposition::Default, async {
+                    assert!(!signal_awaits_turn());
+                    // As `kill $$` in a command substitution does.
+                    assert!(signal_process(&table, parent, signals::TERM));
+                    assert!(signal_awaits_turn());
+                    Ok(ExecutionResult::success())
+                })
+                .await;
+                assert!(signal_awaits_turn());
+                result
+            })
+            .await
+            .unwrap();
+            assert_eq!(result.terminating_signal, Some(signals::TERM));
+            // A caught signal waits for a trap safe point instead.
+            let caught_pid = table.allocate(10, "caught".into());
+            run_numbered_process(&table, caught_pid, caught(true), async {
+                assert!(signal_process(&table, caught_pid, signals::TERM));
+                assert!(!signal_awaits_turn());
+                Ok(ExecutionResult::success())
+            })
+            .await
+            .unwrap();
         });
     }
 
