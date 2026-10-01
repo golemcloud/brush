@@ -266,3 +266,46 @@ fn parse_extended_test_arith_greater_than() -> Result<()> {
     });
     Ok(())
 }
+
+#[test]
+fn parse_extended_test_negation_runs() -> Result<()> {
+    use crate::ast::{CompoundCommand, ExtendedTestExpr};
+    let negations = |bangs: usize| -> Result<Option<usize>> {
+        let input = std::format!("[[ {}a ]]", "! ".repeat(bangs));
+        let program = super::parse_with_config(&input, &super::parser_configs()[0])?;
+        let text = program.to_string();
+        let Some(CompoundCommand::ExtendedTest(test)) = program
+            .complete_commands
+            .first()
+            .and_then(|list| list.0.first())
+            .and_then(|item| item.0.first.seq.first())
+            .and_then(|command| match command {
+                crate::ast::Command::Compound(compound, _) => Some(compound.clone()),
+                _ => None,
+            })
+        else {
+            anyhow::bail!("not an extended test: {text}");
+        };
+        let mut depth = 0;
+        let mut expr = &test.expr;
+        while let ExtendedTestExpr::Not(inner) = expr {
+            depth += 1;
+            expr = inner;
+        }
+        Ok(matches!(expr, ExtendedTestExpr::UnaryTest(..)).then_some(depth))
+    };
+    // As bash reads a run of `!`: negated once when it is odd, not at all when it is even, and
+    // without nesting, however long it is.
+    for (bangs, expected) in [(1, 1), (2, 0), (3, 1), (100_001, 1)] {
+        let found = negations(bangs)?;
+        anyhow::ensure!(found == Some(expected), "{bangs} bangs: {found:?}");
+    }
+    // As in bash, a run with nothing after it is an error.
+    for input in ["[[ ! ]]", "[[ ! ! ]]"] {
+        anyhow::ensure!(
+            super::parse_with_config(input, &super::parser_configs()[0]).is_err(),
+            "{input}"
+        );
+    }
+    Ok(())
+}

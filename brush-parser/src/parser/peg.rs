@@ -287,7 +287,9 @@ peg::parser! {
             --
             left:(@) specific_operator("&&") linebreak() right:@ { ast::ExtendedTestExpr::And(Box::from(left), Box::from(right)) }
             --
-            specific_word("!") linebreak() e:@ { ast::ExtendedTestExpr::Not(Box::from(e)) }
+            // A run of `!` is read in one go, and negates as bash reads it: once if it is odd,
+            // not at all if it is even.
+            bangs:(specific_word("!") linebreak())+ e:@ { negated(bangs.len(), e) }
             --
             specific_operator("(") linebreak() e:extended_test_expression() specific_operator(")") linebreak() { ast::ExtendedTestExpr::Parenthesized(Box::from(e)) }
             --
@@ -859,6 +861,15 @@ fn add_pipe_extension_redirection(c: &mut ast::Command) {
         }
         ast::Command::Compound(_, l) => add_to_redirect_list(l, r),
         ast::Command::Function(f) => add_to_redirect_list(&mut f.body.1, r),
+    }
+}
+
+/// `expr` after a run of `bangs` `!`s in `[[ ]]`.
+fn negated(bangs: usize, expr: ast::ExtendedTestExpr) -> ast::ExtendedTestExpr {
+    if bangs % 2 == 1 {
+        ast::ExtendedTestExpr::Not(Box::new(expr))
+    } else {
+        expr
     }
 }
 
