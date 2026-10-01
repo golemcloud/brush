@@ -193,6 +193,8 @@ impl MapFileCommand {
             let Some(line) = lines.next(&mut input_file).await? else {
                 break;
             };
+            // The line itself is already held; its element in the array is still to come.
+            brush_core::memory::reserve_push(&entries, brush_core::memory::ELEMENT_BYTES)?;
             entries.push((None, line));
         }
         Ok(variables::ArrayLiteral(entries))
@@ -299,6 +301,7 @@ impl Lines {
                     Ok(1) if self.terminal && buf[0] == b'\x04' && line.is_empty() => break, // Ctrl+D
                     Ok(1) => {
                         let byte = buf[0];
+                        brush_core::memory::reserve_growth(line.len(), line.capacity(), 1)?;
                         line.push(byte);
                         if byte == self.delimiter {
                             saw_delimiter = true;

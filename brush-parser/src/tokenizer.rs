@@ -150,6 +150,31 @@ pub enum TokenizerError {
     /// An I/O error occurred while reading from the input stream.
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
+
+    /// Parsing the input would take more memory than the embedder allows (see
+    /// [`set_parse_budget`]): the tokens and characters read when it stopped.
+    #[error("input too large to parse")]
+    TooLarge {
+        /// The tokens read.
+        tokens: usize,
+        /// The characters read.
+        chars: usize,
+    },
+}
+
+/// What a parse may hold, as the embedder sets it with [`set_parse_budget`].
+static PARSE_BUDGET: std::sync::OnceLock<fn(usize, usize) -> bool> = std::sync::OnceLock::new();
+
+/// Characters read between checks of the parse budget.
+const CHARS_PER_BUDGET_CHECK: usize = 4096;
+
+/// Sets the memory a parse keeps to.
+///
+/// `fits(tokens, chars)` says whether a parse that has read so many tokens from so many characters
+/// can hold its syntax tree; one that cannot fails with [`TokenizerError::TooLarge`]. Only the first
+/// call has an effect.
+pub fn set_parse_budget(fits: fn(usize, usize) -> bool) {
+    let _ = PARSE_BUDGET.set(fits);
 }
 
 /// A here-document that the input ended in before its delimiter.
@@ -290,6 +315,9 @@ pub(crate) struct Tokenizer<'a, R: ?Sized + std::io::BufRead> {
     text: String,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
+    /// The tokens and characters read so far, for the parse budget.
+    tokens_read: usize,
+    chars_read: usize,
 }
 
 /// Encapsulates the current token parsing state.
@@ -554,6 +582,9 @@ pub fn tokenize_str_with_options(
     input: &str,
     options: &TokenizerOptions,
 ) -> Result<Vec<Token>, TokenizerError> {
+    if input.len() > crate::parser::MAX_CACHED_TEXT_LEN {
+        return uncached_tokenize_str(input, options);
+    }
     uncached_tokenize_string(input, options)
 }
 
@@ -643,6 +674,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 here_body_after_line: 0,
                 compound_assignment: false,
             },
+            tokens_read: 0,
+            chars_read: 0,
         }
     }
 
@@ -661,6 +694,17 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 .transpose()
                 .map_err(TokenizerError::ReadError)?;
             self.text.extend(c);
+            self.chars_read += 1;
+            if self.chars_read.is_multiple_of(CHARS_PER_BUDGET_CHECK)
+                && PARSE_BUDGET
+                    .get()
+                    .is_some_and(|fits| !fits(self.tokens_read, self.chars_read))
+            {
+                return Err(TokenizerError::TooLarge {
+                    tokens: self.tokens_read,
+                    chars: self.chars_read,
+                });
+            }
             c
         };
 
@@ -713,7 +757,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     }
 
     pub fn next_token(&mut self) -> Result<TokenizeResult, TokenizerError> {
-        self.next_token_until(None, false /* include space? */)
+        let result = self.next_token_until(None, false /* include space? */)?;
+        if result.token.is_some() {
+            self.tokens_read += 1;
+        }
+        Ok(result)
     }
 
     /// Sets aside the here-documents pending on the current line while a nested construct
@@ -2569,5 +2617,22 @@ HERE2
         assert_eq!(unquote_str(r#""a\$b""#), "a$b");
         // Outside quotes, backslash escapes the next character.
         assert_eq!(unquote_str(r"hel\'lo"), "hel'lo");
+    }
+
+    #[test]
+    fn tokenizing_stops_where_the_parse_budget_says() {
+        // No other test reads near this many tokens.
+        set_parse_budget(|tokens, _| tokens < 100_000);
+        let text = "x ".repeat(150_000);
+        assert!(matches!(
+            uncached_tokenize_str(&text, &TokenizerOptions::default()),
+            Err(TokenizerError::TooLarge { tokens, .. }) if tokens >= 100_000
+        ));
+        assert_eq!(
+            uncached_tokenize_str(&"x ".repeat(1000), &TokenizerOptions::default())
+                .map(|tokens| tokens.len())
+                .unwrap_or_default(),
+            1000
+        );
     }
 }

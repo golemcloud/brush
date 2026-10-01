@@ -763,6 +763,9 @@ async fn read_line_with_reader(
     }
 
     loop {
+        // A line can be as long as the input; the shell must be able to hold it as it grows (a
+        // character and an escape take at most eight bytes).
+        brush_core::memory::reserve_growth(line.len(), line.capacity(), 8)?;
         // Only a terminal sends Ctrl+C and Ctrl+D as keys; elsewhere they are data.
         let event = match reader.read_event().await? {
             InputEvent::CtrlC if !config.terminal => InputEvent::Char(CTRL_C),

@@ -450,6 +450,8 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
     ///
     /// * `options` - The options to use when creating the shell.
     pub(crate) fn new(options: CreateOptions<SE>) -> Result<Self, error::Error> {
+        crate::memory::limit_parses();
+
         // Compute runtime options before moving fields out of `options`.
         let runtime_options = RuntimeOptions::defaults_from(&options);
 

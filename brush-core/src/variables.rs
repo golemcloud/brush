@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::fmt::{Display, Write};
 
 use crate::shell::{Shell, ShellState};
-use crate::{error, escape, extensions};
+use crate::{error, escape, extensions, memory};
 
 /// A shell variable.
 #[derive(Clone, Debug)]
@@ -392,8 +392,14 @@ impl ShellVariable {
     ///
     /// * `value` - The value to assign to the variable.
     /// * `append` - Whether or not to append the value to the preexisting value.
-    #[expect(clippy::too_many_lines)]
     pub fn assign(&mut self, value: ShellValueLiteral, append: bool) -> Result<(), error::Error> {
+        let bytes = value.heap_bytes();
+        self.assign_value(value, append)?;
+        memory::check_held(bytes)
+    }
+
+    #[expect(clippy::too_many_lines)]
+    fn assign_value(&mut self, value: ShellValueLiteral, append: bool) -> Result<(), error::Error> {
         if self.is_readonly() {
             return Err(error::ErrorKind::ReadonlyVariable.into());
         }
@@ -411,13 +417,13 @@ impl ShellVariable {
                     ),
                     _,
                 ) => {
-                    self.assign(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
+                    self.assign_value(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
                 }
                 // If we're appending a scalar to a declared-but-unset variable, then
                 // start with the empty string. This will result in the right thing happening,
                 // even in treat-as-integer cases.
                 (ShellValue::Unset(_), ShellValueLiteral::Scalar(_)) => {
-                    self.assign(ShellValueLiteral::Scalar(String::new()), false)?;
+                    self.assign_value(ShellValueLiteral::Scalar(String::new()), false)?;
                 }
                 // If we're trying to append an array to a string, we first promote the string to be
                 // an array with the string being present at index 0.
@@ -429,6 +435,16 @@ impl ShellVariable {
 
             let treat_as_int = self.is_treated_as_integer();
             let update_transform = self.get_update_transform();
+            self.reserve_to_change()?;
+            match (&*self.value, &value) {
+                (ShellValue::String(base), ShellValueLiteral::Scalar(suffix)) => {
+                    memory::reserve_growth(base.len(), base.capacity(), suffix.len())?;
+                }
+                (_, ShellValueLiteral::Array(elements)) => {
+                    memory::reserve(elements.0.len() * memory::ELEMENT_BYTES)?;
+                }
+                _ => (),
+            }
 
             match std::sync::Arc::make_mut(&mut self.value) {
                 ShellValue::String(base) => match value {
@@ -498,6 +514,7 @@ impl ShellVariable {
                     | ShellValue::Dynamic { .. },
                     ShellValueLiteral::Array(literal_values),
                 ) => {
+                    memory::reserve(literal_values.0.len() * memory::ELEMENT_BYTES)?;
                     self.value = std::sync::Arc::new(ShellValue::indexed_array_from_literals(
                         literal_values,
                     ));
@@ -511,6 +528,7 @@ impl ShellVariable {
                     | ShellValue::Unset(ShellValueUnsetType::AssociativeArray),
                     ShellValueLiteral::Array(literal_values),
                 ) => {
+                    memory::reserve(literal_values.0.len() * memory::ELEMENT_BYTES)?;
                     self.value = std::sync::Arc::new(ShellValue::associative_array_from_literals(
                         literal_values,
                     )?);
@@ -548,13 +566,24 @@ impl ShellVariable {
         value: String,
         append: bool,
     ) -> Result<(), error::Error> {
+        let bytes = memory::ELEMENT_BYTES + memory::text_bytes(&value);
+        self.assign_value_at_index(array_index, value, append)?;
+        memory::check_held(bytes)
+    }
+
+    fn assign_value_at_index(
+        &mut self,
+        array_index: String,
+        value: String,
+        append: bool,
+    ) -> Result<(), error::Error> {
         if self.is_readonly() {
             return Err(error::ErrorKind::ReadonlyVariable.into());
         }
 
         match &*self.value {
             ShellValue::Unset(_) => {
-                self.assign(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
+                self.assign_value(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
             }
             ShellValue::String(_) => {
                 self.convert_to_indexed_array()?;
@@ -564,6 +593,7 @@ impl ShellVariable {
 
         let treat_as_int = self.is_treated_as_integer();
         let value = self.convert_value_str_for_assignment(value);
+        self.reserve_to_change()?;
 
         match std::sync::Arc::make_mut(&mut self.value) {
             ShellValue::IndexedArray(arr) => {
@@ -571,6 +601,7 @@ impl ShellVariable {
 
                 if append {
                     let existing_value = arr.get(&key).map_or("", |v| v.as_str());
+                    memory::reserve(memory::text_bytes(existing_value) + value.len())?;
 
                     let mut new_value;
                     if treat_as_int {
@@ -592,6 +623,7 @@ impl ShellVariable {
             ShellValue::AssociativeArray(arr) => {
                 if append {
                     let existing_value = arr.get(array_index.as_str()).map_or("", |v| v.as_str());
+                    memory::reserve(memory::text_bytes(existing_value) + value.len())?;
 
                     let mut new_value;
                     if treat_as_int {
@@ -613,6 +645,15 @@ impl ShellVariable {
                 tracing::error!("assigning to index {array_index} of {:?}", self.value);
                 error::unimp("assigning to index of non-array variable")
             }
+        }
+    }
+
+    /// Checks that the value can be changed: one a subshell or job shares is copied first.
+    fn reserve_to_change(&self) -> Result<(), error::Error> {
+        if std::sync::Arc::strong_count(&self.value) > 1 {
+            memory::reserve(self.value.heap_bytes())
+        } else {
+            Ok(())
         }
     }
 
@@ -928,6 +969,18 @@ pub enum ShellValueLiteral {
 }
 
 impl ShellValueLiteral {
+    /// About the bytes the value takes once assigned (see [`crate::memory`]).
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Scalar(value) => memory::text_bytes(value),
+            Self::Array(elements) => elements
+                .0
+                .iter()
+                .map(|(_, value)| memory::ELEMENT_BYTES + memory::text_bytes(value))
+                .sum(),
+        }
+    }
+
     pub(crate) fn fmt_for_tracing(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Scalar(s) => Self::fmt_scalar_for_tracing(s.as_str(), f),
@@ -1049,6 +1102,26 @@ pub enum FormatStyle {
 }
 
 impl ShellValue {
+    /// About the bytes a copy of the value takes (see [`crate::memory`]).
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Self::String(value) => memory::text_bytes(value),
+            Self::IndexedArray(values) => values
+                .values()
+                .map(|value| memory::ELEMENT_BYTES + memory::text_bytes(value))
+                .sum(),
+            // Each key is kept twice: with its value, and in its bucket's list.
+            Self::AssociativeArray(values) => values
+                .values
+                .iter()
+                .map(|(key, value)| {
+                    memory::ELEMENT_BYTES + 2 * memory::text_bytes(key) + memory::text_bytes(value)
+                })
+                .sum(),
+            Self::Unset(_) | Self::Dynamic { .. } => 0,
+        }
+    }
+
     /// Returns whether or not the value is an indexed array, including a declared but unset one.
     pub const fn is_indexed_array(&self) -> bool {
         matches!(
@@ -1187,6 +1260,8 @@ impl ShellValue {
         style: FormatStyle,
         shell: &Shell<impl extensions::ShellExtensions>,
     ) -> Result<Cow<'_, str>, error::Error> {
+        // Quoting can double the text, and the command that prints it copies it again.
+        memory::reserve(self.heap_bytes().saturating_mul(3))?;
         match self {
             Self::Unset(_) => Ok("".into()),
             Self::String(s) => match style {

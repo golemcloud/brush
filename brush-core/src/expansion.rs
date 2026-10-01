@@ -16,6 +16,7 @@ use crate::env;
 use crate::error;
 use crate::escape;
 use crate::extensions;
+use crate::memory;
 use crate::patterns;
 use crate::prompt;
 use crate::shell::Shell;
@@ -243,6 +244,14 @@ impl Expansion {
         self.len_in(self.kind.counts_chars())
     }
 
+    /// About the bytes a copy of the fields' text takes.
+    fn text_bytes(&self) -> usize {
+        self.fields
+            .iter()
+            .map(|field| memory::allocation_bytes(field.text_len()))
+            .sum()
+    }
+
     /// Returns the length that `${x:offset:length}` addresses.
     fn slice_len(&self) -> usize {
         self.len_in(self.kind.slices_chars())
@@ -360,6 +369,20 @@ impl WordField {
     /// The length in characters, not bytes, as in a UTF-8 locale; slicing counts the same way.
     pub fn len(&self) -> usize {
         self.0.iter().fold(0, |acc, piece| acc + piece.len())
+    }
+
+    /// The length of the field's text in bytes.
+    fn text_len(&self) -> usize {
+        self.0.iter().map(|piece| piece.as_str().len()).sum()
+    }
+
+    /// The bytes joining the field's pieces into one string allocates: none for a single piece,
+    /// which is taken as it is.
+    fn joined_bytes(&self) -> usize {
+        match self.0.as_slice() {
+            [] | [_] => 0,
+            _ => memory::allocation_bytes(self.text_len()),
+        }
     }
 }
 
@@ -846,7 +869,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
     /// Apply tilde-expansion, parameter expansion, command substitution, and arithmetic expansion.
     pub async fn basic_expand_to_str(&mut self, word: &str) -> Result<String, error::Error> {
         let expansion = self.basic_expand(word).await?;
-        Ok(self.fields_to_string(expansion))
+        self.fields_to_string(expansion)
     }
 
     /// Join an [`Expansion`]'s fields into a single string for scalar
@@ -855,17 +878,35 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
     /// `$@`/`${a[@]}` join with a space. A single field (the common case) is
     /// unaffected. Without this, e.g. `x=${arr[*]}` under `IFS=:` would yield
     /// `a b c` instead of bash's `a:b:c`.
-    fn fields_to_string(&self, expansion: Expansion) -> String {
+    fn fields_to_string(&self, expansion: Expansion) -> Result<String, error::Error> {
         let joiner = if expansion.concatenate {
             self.shell.ifs_joiner()
         } else {
             String::from(' ')
         };
-        expansion
-            .fields
-            .into_iter()
-            .map(String::from)
-            .join(joiner.as_str())
+        let mut fields = expansion.fields.into_iter();
+        let Some(first) = fields.next() else {
+            return Ok(String::new());
+        };
+        // A single field is taken as it is, without a copy.
+        if fields.len() == 0 {
+            memory::reserve(first.joined_bytes())?;
+            return Ok(String::from(first));
+        }
+        let fields: Vec<WordField> = std::iter::once(first).chain(fields).collect();
+        let len = fields.iter().map(WordField::text_len).sum::<usize>()
+            + joiner.len() * (fields.len() - 1);
+        memory::reserve(memory::allocation_bytes(len))?;
+        let mut joined = String::with_capacity(len);
+        for (i, field) in fields.into_iter().enumerate() {
+            if i > 0 {
+                joined.push_str(&joiner);
+            }
+            for piece in field.0 {
+                joined.push_str(piece.as_str());
+            }
+        }
+        Ok(joined)
     }
 
     async fn basic_expand_opt_pattern(
@@ -940,6 +981,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
     /// Apply tilde-expansion, parameter expansion, command substitution, and arithmetic expansion;
     /// yield pieces that could be further processed.
     async fn basic_expand(&mut self, word: &str) -> Result<Expansion, error::Error> {
+        let expansion = self.basic_expand_unchecked(word).await?;
+        // Whatever the expansion copied or built is now held.
+        memory::check_held(expansion.text_bytes())?;
+        Ok(expansion)
+    }
+
+    async fn basic_expand_unchecked(&mut self, word: &str) -> Result<Expansion, error::Error> {
         tracing::debug!(target: trace_categories::EXPANSION, "Basic expanding: '{word}'");
 
         if self.outer_word.is_none() {
@@ -976,7 +1024,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
         // Apply brace expansion first, before anything else (not applicable to heredoc bodies).
         // Bash performs it before every other expansion and each result is a word of its
         // own; that is what keeps the results separate when IFS lacks a space.
-        let Some(brace_words) = self.brace_expand_if_needed(word) else {
+        let Some(brace_words) = self.brace_expand_if_needed(word)? else {
             return self.expand_unbraced_word(word, assignment_word).await;
         };
 
@@ -1140,27 +1188,34 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
     /// Performs brace expansion on the word, yielding the resulting words, or `None` if
     /// the word contains no brace expression.
-    fn brace_expand_if_needed(&self, word: &str) -> Option<Vec<String>> {
+    fn brace_expand_if_needed(&self, word: &str) -> Result<Option<Vec<String>>, error::Error> {
         // We perform a non-authoritative check to see if the string *may* contain braces
         // to expand. There may be false positives, but must be no false negatives.
         if self.disable_brace_expansion
             || !self.shell.options().perform_brace_expansion
             || !may_contain_braces_to_expand(word)
         {
-            return None;
+            return Ok(None);
         }
 
         let brace_expansion_pieces =
             match brush_parser::word::parse_brace_expansions(word, &self.parser_options) {
                 Ok(Some(pieces)) => pieces,
-                Ok(None) => return None,
+                Ok(None) => return Ok(None),
                 Err(err) => {
                     tracing::error!("failed to parse for brace expansion: {err:?}");
-                    return None;
+                    return Ok(None);
                 }
             };
 
         tracing::debug!(target: trace_categories::EXPANSION, "Brace expansion pieces: {brace_expansion_pieces:?}");
+
+        // The words are generated all at once, then expanded one by one into fields beside them.
+        // More than the shell can hold fails as any other expansion does, before any is made.
+        let (count, bytes) = braceexpansion::expansion_size(&brace_expansion_pieces);
+        if !memory::can_hold(bytes) {
+            return Err(error::ErrorKind::BraceExpansionTooLarge(count).into());
+        }
 
         // An alternative that expands to nothing yields no word at all (like any other
         // unquoted empty expansion); `{a,}` is just `a`.
@@ -1169,7 +1224,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
             .filter(|s| !s.is_empty())
             .collect();
 
-        Some(words)
+        Ok(Some(words))
     }
 
     /// Apply tilde-expansion, parameter expansion, command substitution, and arithmetic expansion;
@@ -1182,15 +1237,21 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
         let basic_expansion = self.basic_expand(word).await?;
 
         // Then split.
-        let fields: Vec<WordField> = fieldsplit::split_fields(&self.shell.ifs(), basic_expansion);
+        let fields: Vec<WordField> = fieldsplit::split_fields(&self.shell.ifs(), basic_expansion)?;
 
         // Now expand pathnames if necessary. This also unquotes as a side effect.
         // We also know a length that the vector may be at minimally.
+        memory::reserve(
+            fields.len() * std::mem::size_of::<String>()
+                + fields.iter().map(WordField::joined_bytes).sum::<usize>(),
+        )?;
         let mut result = Vec::with_capacity(fields.len());
         for field in fields {
             if self.disable_pathname_expansion || self.shell.options().disable_filename_globbing {
                 result.push(String::from(field));
             } else {
+                // Matching the field as a pattern takes two copies of its text.
+                memory::reserve(2 * memory::allocation_bytes(field.text_len()))?;
                 result.extend(self.expand_pathnames_in_field(field)?);
             }
         }
@@ -1616,7 +1677,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                             parameter => parameter,
                         };
                         let expanded_default = self.expand_parameter_word(default_value).await?;
-                        let expanded_default_value = self.fields_to_string(expanded_default);
+                        let expanded_default_value = self.fields_to_string(expanded_default)?;
                         self.assign_to_parameter(parameter, expanded_default_value.clone())
                             .await?;
                         Ok(Expansion::from(expanded_default_value))
@@ -1659,7 +1720,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                                 std::mem::replace(&mut self.in_double_quotes, false);
                             let expansion = self.basic_expand(error_message).await;
                             self.in_double_quotes = previously_in_double_quotes;
-                            fieldsplit::split_fields(&self.shell.ifs(), expansion?)
+                            fieldsplit::split_fields(&self.shell.ifs(), expansion?)?
                                 .into_iter()
                                 .map(String::from)
                                 .join(" ")
@@ -1878,6 +1939,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                     expanded_parameter_len
                 };
 
+                // The slice is a copy of at most the whole text.
+                memory::reserve(expanded_parameter.text_bytes())?;
                 #[expect(clippy::cast_sign_loss)]
                 Ok(expanded_parameter
                     .polymorphic_subslice(expanded_offset as usize, end_offset as usize))
@@ -2060,10 +2123,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
                 let mut transformed_fields = vec![];
                 for field in expanded_parameter.fields {
+                    memory::reserve(field.joined_bytes())?;
                     let s = String::from(field);
+                    memory::reserve(transformed_bytes(&op, &s))?;
                     let transformed = self
                         .apply_transform_to(&op, &s, came_from_undefined)
                         .await?;
+                    memory::check_held(memory::text_bytes(&transformed))?;
                     transformed_fields.push(WordField::from(transformed));
                 }
 
@@ -2176,12 +2242,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 )?;
 
                 transform_expansion(expanded_parameter, async |s| {
-                    Ok(Self::replace_substring(
-                        s.as_str(),
-                        &regex,
-                        &template,
-                        &match_kind,
-                    ))
+                    Self::replace_substring(s.as_str(), &regex, &template, &match_kind)
                 })
                 .await
             }
@@ -2498,7 +2559,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
             Ok(self.try_resolve_parameter_to_variable_without_indirect(parameter))
         } else {
             let expansion = self.expand_parameter(parameter, false).await?;
-            let parameter_str: String = self.fields_to_string(expansion);
+            let parameter_str: String = self.fields_to_string(expansion)?;
             let inner_parameter = self.parse_indirect_parameter(parameter_str)?;
             Ok(self.try_resolve_parameter_to_variable_without_indirect(&inner_parameter))
         }
@@ -2630,7 +2691,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
             if expansion.undefined {
                 return unset();
             }
-            let parameter_str: String = self.fields_to_string(expansion);
+            let parameter_str: String = self.fields_to_string(expansion)?;
             let inner_parameter = self.parse_indirect_parameter(parameter_str)?;
 
             let inner = self
@@ -2667,6 +2728,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 } else if let Some(parameter) =
                     self.shell.current_shell_args().get((p - 1) as usize)
                 {
+                    memory::reserve(memory::text_bytes(parameter))?;
                     Ok(Expansion::from(parameter.to_owned()))
                 } else {
                     self.undefined_expansion(parameter, allow_unset_vars)
@@ -2722,6 +2784,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                     } else {
                         let value = var.value().try_get_cow_str(self.shell);
                         if let Some(value) = value {
+                            memory::reserve(memory::text_bytes(&value))?;
                             Ok(Expansion::from(value.to_string()))
                         } else {
                             self.undefined_expansion(parameter, allow_unset_vars)
@@ -2754,10 +2817,22 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 let element = self.shell.env().get(name).map(|(_, var)| {
                     var.value()
                         .get_at(index_to_use.as_str(), self.shell)
-                        .map(|value| value.map(|value| value.to_string()))
+                        .and_then(|value| {
+                            value
+                                .map(|value| {
+                                    memory::reserve(memory::text_bytes(&value))
+                                        .map(|()| value.into_owned())
+                                })
+                                .transpose()
+                        })
                 });
                 match element {
                     Some(Ok(Some(value))) => Ok(Expansion::from(value)),
+                    Some(Err(error))
+                        if matches!(error.kind(), error::ErrorKind::OutOfMemory(_)) =>
+                    {
+                        Err(error)
+                    }
                     Some(Err(error))
                         if matches!(error.kind(), error::ErrorKind::ArrayIndexOutOfRange(_)) =>
                     {
@@ -2783,6 +2858,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                         }
                         other => other,
                     };
+                    memory::reserve(value.heap_bytes())?;
                     let fields =
                         list_element_fields(value.element_values(self.shell), value.is_array());
 
@@ -2978,20 +3054,41 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
         regex: &fancy_regex::Regex,
         template: &[ReplacementPiece],
         match_kind: &SubstringMatchKind,
-    ) -> String {
+    ) -> Result<String, error::Error> {
+        // What the replacements add is checked as it grows, each time for as much again as the
+        // text holds so far, which is what its buffer takes when it next moves; once that does
+        // not fit, the rest of the matches are replaced with nothing and the expansion fails.
+        let added = std::cell::Cell::new(0usize);
+        let unchecked = std::cell::Cell::new(0usize);
+        let refused = std::cell::Cell::new(None);
         // The replacement is built from the template for each match; its text is never read
         // as the regex crate's `$name` syntax.
         let replacement = |captures: &fancy_regex::Captures<'_, str>| -> String {
+            if refused.get().is_some() {
+                return String::new();
+            }
             let matched = captures.get(0).map_or("", |m| m.as_str());
-            template
+            let text: String = template
                 .iter()
                 .map(|piece| match piece {
                     ReplacementPiece::Text(text) => text.as_str(),
                     ReplacementPiece::Match => matched,
                 })
-                .collect()
+                .collect();
+            added.set(added.get() + text.len());
+            unchecked.set(unchecked.get() + text.len());
+            if unchecked.get() >= REPLACEMENT_BYTES_PER_CHECK {
+                let next = memory::allocation_bytes(s.len() + added.get());
+                if memory::reserve(next).is_err() {
+                    refused.set(Some(next));
+                    return String::new();
+                }
+                unchecked.set(0);
+            }
+            text
         };
-        match match_kind {
+        memory::reserve(memory::text_bytes(s))?;
+        let replaced = match match_kind {
             brush_parser::word::SubstringMatchKind::Prefix
             | brush_parser::word::SubstringMatchKind::Suffix
             | brush_parser::word::SubstringMatchKind::FirstOccurrence => {
@@ -3001,6 +3098,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
             brush_parser::word::SubstringMatchKind::Anywhere => {
                 regex.replace_all(s, replacement).into_owned()
             }
+        };
+        match refused.get() {
+            Some(bytes) => Err(memory::out_of_memory(bytes)),
+            None => Ok(replaced),
         }
     }
 
@@ -3153,6 +3254,30 @@ fn coalesce_expansions(expansions: Vec<Expansion>) -> Expansion {
         })
 }
 
+/// Replacement text added before the shell checks again that it can hold it (see
+/// [`crate::memory`]).
+const REPLACEMENT_BYTES_PER_CHECK: usize = 1 << 20;
+
+/// At most the bytes `${x@op}` makes of `text`: quoting can take four bytes for one (`\001`), and
+/// case mapping outside ASCII three (`ß` to `SS`); the others give about as much as they take.
+const fn transformed_bytes(op: &ParameterTransformOp, text: &str) -> usize {
+    let len = match op {
+        ParameterTransformOp::Quoted
+        | ParameterTransformOp::PossiblyQuoteWithArraysExpanded { .. } => {
+            text.len().saturating_mul(4).saturating_add(3)
+        }
+        ParameterTransformOp::ToLowerCase
+        | ParameterTransformOp::ToUpperCase
+        | ParameterTransformOp::CapitalizeInitial
+            if !text.is_ascii() =>
+        {
+            text.len().saturating_mul(3)
+        }
+        _ => text.len(),
+    };
+    memory::allocation_bytes(len)
+}
+
 /// The string with its first character in upper case, as `${x@u}` gives.
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
@@ -3173,8 +3298,13 @@ where
 {
     let mut transformed_fields = vec![];
     for field in expansion.fields {
-        let transformed_field = WordField::from(f(String::from(field)).await?);
-        transformed_fields.push(transformed_field);
+        memory::reserve(field.joined_bytes())?;
+        let text = String::from(field);
+        // These transforms give at most about as much text as they take.
+        memory::reserve(memory::text_bytes(&text))?;
+        let transformed = f(text).await?;
+        memory::check_held(memory::text_bytes(&transformed))?;
+        transformed_fields.push(WordField::from(transformed));
     }
 
     Ok(Expansion {
@@ -3406,7 +3536,7 @@ mod tests {
         let params = shell.default_exec_params();
         let expander = WordExpander::new(&mut shell, &params);
 
-        let expand = |w| expander.brace_expand_if_needed(w);
+        let expand = |w| expander.brace_expand_if_needed(w).unwrap();
         assert_eq!(expand("abc"), None);
         assert_eq!(expand("a{,b}d"), Some(vec!["ad".into(), "abd".into()]));
         assert_eq!(expand("a{b,c}d"), Some(vec!["abd".into(), "acd".into()]));
@@ -3421,6 +3551,16 @@ mod tests {
             expand("{a,b{1,2}}"),
             Some(vec!["a".into(), "b1".into(), "b2".into()])
         );
+
+        // One the shell could not hold fails before any word is made.
+        let refused = expander
+            .brace_expand_if_needed("{1..100000000}")
+            .unwrap_err();
+        assert!(matches!(
+            refused.kind(),
+            error::ErrorKind::BraceExpansionTooLarge(100_000_000)
+        ));
+        assert!(!refused.is_fatal());
 
         Ok(())
     }

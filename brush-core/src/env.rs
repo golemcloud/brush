@@ -835,14 +835,15 @@ impl ShellEnvironment {
             var.export();
         }
 
+        let bytes = var.value().heap_bytes();
         for (scope_type, map) in self.scopes.iter_mut().rev() {
             if *scope_type == target_scope {
-                let prev_var = map.set(name, var);
-                if prev_var.is_none() {
+                // Any variable it replaces is gone before the check.
+                if map.set(name, var).is_none() {
                     self.entry_count += 1;
                 }
 
-                return Ok(());
+                return crate::memory::check_held(bytes);
             }
         }
 

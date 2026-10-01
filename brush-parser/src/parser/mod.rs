@@ -9,6 +9,10 @@ pub mod peg;
 #[cfg(feature = "winnow-parser")]
 pub mod winnow_str;
 
+/// The longest text the parse caches keep. They outlive the shell that filled them, so longer
+/// text is parsed each time it is run.
+pub const MAX_CACHED_TEXT_LEN: usize = 1024;
+
 /// Parser implementation to use
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Default)]
 pub enum ParserImpl {

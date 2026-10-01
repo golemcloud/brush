@@ -254,8 +254,19 @@ async fn run_broken_substitution(
     expansion::command_substitution_output(shell, params, command, false).await
 }
 
-#[cached::macros::cached(max_size = 64, key = "String", convert = r#"{ spec.to_owned() }"#)]
 fn parse_prompt(
+    spec: &str,
+) -> Result<Vec<brush_parser::prompt::PromptPiece>, brush_parser::WordParseError> {
+    // The cache outlives the shell, so a long prompt (`${x@P}` of a large value) is parsed each
+    // time.
+    if spec.len() > brush_parser::MAX_CACHED_TEXT_LEN {
+        return brush_parser::prompt::parse(spec);
+    }
+    cached_parse_prompt(spec)
+}
+
+#[cached::macros::cached(max_size = 64, key = "String", convert = r#"{ spec.to_owned() }"#)]
+fn cached_parse_prompt(
     spec: &str,
 ) -> Result<Vec<brush_parser::prompt::PromptPiece>, brush_parser::WordParseError> {
     brush_parser::prompt::parse(spec)

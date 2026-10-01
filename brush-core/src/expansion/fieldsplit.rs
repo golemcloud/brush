@@ -14,6 +14,14 @@
 //! at the very end closes the field before it but does not open an empty one after it.
 
 use super::{Expansion, ExpansionPiece, WordField};
+use crate::{error, memory};
+
+/// Adds a field, once the shell can hold it (see [`crate::memory`]).
+fn push_field(fields: &mut Vec<WordField>, field: WordField) -> Result<(), error::Error> {
+    memory::reserve_push(fields, memory::ELEMENT_BYTES)?;
+    fields.push(field);
+    Ok(())
+}
 
 /// Where the splitter is relative to the field boundaries it has emitted.
 enum SplitState {
@@ -48,7 +56,14 @@ const fn is_ifs_whitespace(c: char) -> bool {
 /// Splits an expansion's fields on the characters in `ifs`, following bash's rules
 /// (see the module docs). Only [`ExpansionPiece::Splittable`] text is examined;
 /// quoted text and the word's own literal text always stay in the field they are in.
-pub(super) fn split_fields(ifs: &str, expansion: Expansion) -> Vec<WordField> {
+///
+/// # Errors
+///
+/// When the fields would take the shell past its memory budget.
+pub(super) fn split_fields(
+    ifs: &str,
+    expansion: Expansion,
+) -> Result<Vec<WordField>, error::Error> {
     let mut fields: Vec<WordField> = vec![];
     let mut current_field = WordField::new();
     let has_hard_delimiter = ifs.chars().any(|c| !is_ifs_whitespace(c));
@@ -98,7 +113,7 @@ pub(super) fn split_fields(ifs: &str, expansion: Expansion) -> Vec<WordField> {
                             // Either kind closes an open field. The kind decides whether
                             // the run that follows can still absorb a hard delimiter.
                             (SplitState::InField, whitespace) => {
-                                fields.push(std::mem::take(&mut current_field));
+                                push_field(&mut fields, std::mem::take(&mut current_field))?;
                                 if whitespace {
                                     SplitState::AfterWhitespace
                                 } else {
@@ -123,7 +138,7 @@ pub(super) fn split_fields(ifs: &str, expansion: Expansion) -> Vec<WordField> {
                             // A second hard delimiter, or one at the very start: it
                             // closes a field that never got any content.
                             (SplitState::AfterDelimiter, false) => {
-                                fields.push(WordField::new());
+                                push_field(&mut fields, WordField::new())?;
                                 SplitState::AfterDelimiter
                             }
                             // Whitespace between fields is skipped, whatever came
@@ -138,13 +153,13 @@ pub(super) fn split_fields(ifs: &str, expansion: Expansion) -> Vec<WordField> {
         // Only an open field is left to flush. Ending on a delimiter adds nothing, so a
         // trailing `:` never yields a trailing empty field.
         if matches!(state, SplitState::InField) {
-            fields.push(std::mem::take(&mut current_field));
+            push_field(&mut fields, std::mem::take(&mut current_field))?;
         } else if preserve_empty_list_element && has_hard_delimiter {
-            fields.push(WordField::new());
+            push_field(&mut fields, WordField::new())?;
         }
     }
 
-    fields
+    Ok(fields)
 }
 
 #[cfg(test)]
@@ -175,6 +190,7 @@ mod tests {
             ..Expansion::default()
         };
         split_fields(ifs, expansion)
+            .unwrap()
             .into_iter()
             .map(|field| field.0)
             .collect()

@@ -623,6 +623,9 @@ pub fn parse(
     options: &ParserOptions,
 ) -> Result<Vec<WordPieceWithSource>, error::WordParseError> {
     check_nesting(word, true)?;
+    if word.len() > crate::parser::MAX_CACHED_TEXT_LEN {
+        return uncached_parse(word, options);
+    }
     cacheable_parse(word, options)
 }
 
@@ -699,6 +702,13 @@ const fn closing_bracket(open: u8) -> u8 {
     convert = r#"{ (word.to_owned(), options.to_owned()) }"#
 )]
 fn cacheable_parse(
+    word: &str,
+    options: &ParserOptions,
+) -> Result<Vec<WordPieceWithSource>, error::WordParseError> {
+    uncached_parse(word, options)
+}
+
+fn uncached_parse(
     word: &str,
     options: &ParserOptions,
 ) -> Result<Vec<WordPieceWithSource>, error::WordParseError> {

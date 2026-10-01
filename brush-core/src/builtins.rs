@@ -842,6 +842,11 @@ async fn call_builtin(
                 error::ErrorKind::BadArrayElement(element) => {
                     return error::ErrorKind::BadArrayElement(element.clone()).into();
                 }
+                // A failed allocation ends the shell, reported without the builtin, as bash's
+                // `xmalloc` reports it.
+                error::ErrorKind::OutOfMemory(bytes) => {
+                    return error::Error::from(error::ErrorKind::OutOfMemory(*bytes)).into_fatal();
+                }
                 // An error in an array subscript ends the shell, reported without the builtin.
                 error::ErrorKind::ArithmeticSubscript(error) => {
                     return error::ErrorKind::ArithmeticSubscript(error.clone()).into();

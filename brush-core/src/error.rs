@@ -325,6 +325,19 @@ pub enum ErrorKind {
     #[error("maximum nesting level exceeded: deeper nesting is unsupported in bash-tool")]
     NestingTooDeep,
 
+    /// A brace expansion would give more words than the shell's memory holds (see
+    /// [`crate::memory`]): how many. Worded as bash's own refusal when it cannot allocate them.
+    #[error(
+        "brace expansion: failed to allocate memory for {0} elements: {over}",
+        over = crate::memory::OVER_BUDGET
+    )]
+    BraceExpansionTooLarge(u128),
+
+    /// The shell would hold more memory than it may (see [`crate::memory`]): the bytes it
+    /// needed. Worded as bash's own failed allocation, which ends the shell.
+    #[error("xmalloc: cannot allocate {0} bytes: {over}", over = crate::memory::OVER_BUDGET)]
+    OutOfMemory(usize),
+
     /// System time error.
     #[error("system time error: {0}")]
     TimeError(#[from] std::time::SystemTimeError),
@@ -465,6 +478,8 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
             // Found but not run: bash's status for a file it cannot execute.
             ErrorKind::ExecutingFilesUnsupported(..) => Self::CannotExecute,
             ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
+            // Bash's status when an allocation fails.
+            ErrorKind::OutOfMemory(..) => Self::InvalidUsage,
             ErrorKind::IoError(io_err) => io_err.into(),
             ErrorKind::BuiltinError(inner, ..) => inner.as_exit_code(),
             _ => Self::GeneralError,

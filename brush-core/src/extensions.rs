@@ -47,6 +47,10 @@ pub trait ErrorFormatter: Clone + Default + Send + Sync + 'static {
             }
             return text;
         }
+        // A failed allocation names no line, as bash's `xmalloc` does not.
+        if matches!(error.kind(), error::ErrorKind::OutOfMemory(_)) {
+            return std::format!("{}: {error:#}\n", shell.diagnostic_name());
+        }
         std::format!("{}{error:#}\n", shell.diagnostic_prefix())
     }
 }

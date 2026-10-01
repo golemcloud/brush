@@ -610,6 +610,12 @@ async fn execute_list(
             let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
             if run_async {
+                // A job holds a copy of the shell's state, and its record stays until it is
+                // waited for; one the shell cannot hold ends it, as a failed `fork` ends bash.
+                if let Err(error) = crate::memory::reserve(crate::memory::JOB_BYTES) {
+                    let _ = shell.display_error(&mut params.stderr(shell), &error);
+                    return Err(error.into_reported());
+                }
                 #[cfg(target_arch = "wasm32")]
                 if !job_slot_available(shell).await {
                     writeln!(
@@ -3896,7 +3902,10 @@ async fn apply_assignment_unchecked(
                 export = export || shell.options().export_variables_on_modification;
                 ShellValue::String(s)
             }
-            ShellValueLiteral::Array(values) => ShellValue::indexed_array_from_literals(values),
+            ShellValueLiteral::Array(values) => {
+                crate::memory::reserve(values.0.len() * crate::memory::ELEMENT_BYTES)?;
+                ShellValue::indexed_array_from_literals(values)
+            }
         }
     };
 
@@ -4252,6 +4261,7 @@ pub(crate) async fn setup_redirect(
 
             let mut expanded_word =
                 expansion::basic_expand_here_string(shell, params, word).await?;
+            crate::memory::reserve_growth(expanded_word.len(), expanded_word.capacity(), 1)?;
             expanded_word.push('\n');
 
             let f = setup_open_file_with_contents(expanded_word.as_str())?;
@@ -4486,10 +4496,12 @@ pub(crate) async fn setup_word_process_substitution(
     command: &str,
 ) -> Result<String, error::Error> {
     let program = shell.parse_string(command).map_err(|e| {
-        error::Error::from(error::ErrorKind::ParseError(
-            e,
-            crate::SourceInfo::from("main"),
-        ))
+        crate::memory::refused_parse(&e).unwrap_or_else(|| {
+            error::Error::from(error::ErrorKind::ParseError(
+                e,
+                crate::SourceInfo::from("main"),
+            ))
+        })
     })?;
     let subshell = ast::SubshellCommand {
         list: ast::CompoundList(
@@ -4779,6 +4791,7 @@ fn setup_open_file_with_contents(contents: &str) -> Result<OpenFile, error::Erro
     // consumer, so here-documents larger than the pipe capacity cannot deadlock initialization.
     #[cfg(target_arch = "wasm32")]
     {
+        crate::memory::reserve(crate::memory::allocation_bytes(bytes.len()))?;
         Ok(openfiles::from_bytes(bytes.to_vec()))
     }
 

@@ -28,6 +28,9 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
         s: S,
     ) -> Result<brush_parser::ast::Program, brush_parser::ParseError> {
         let s: String = s.into();
+        if s.len() > brush_parser::MAX_CACHED_TEXT_LEN {
+            return parse_string_uncached(&s, &self.parser_options());
+        }
         parse_string_impl(&s, &self.parser_options())
     }
 
@@ -56,6 +59,13 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
     convert = r#"{ (s.to_owned(), parser_options.to_owned()) }"#
 )]
 fn parse_string_impl(
+    s: &str,
+    parser_options: &brush_parser::ParserOptions,
+) -> Result<brush_parser::ast::Program, brush_parser::ParseError> {
+    parse_string_uncached(s, parser_options)
+}
+
+fn parse_string_uncached(
     s: &str,
     parser_options: &brush_parser::ParserOptions,
 ) -> Result<brush_parser::ast::Program, brush_parser::ParseError> {

@@ -424,7 +424,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
                 // Bash updates $_ even when the command is not found, so mirror
                 // that here before reporting the error.
                 if self.record_last_arg {
-                    let last_arg = Self::take_last_arg(&self.args);
+                    let last_arg = Self::take_last_arg(&self.args)?;
                     self.shell.update_last_arg_variable(last_arg);
                 }
 
@@ -471,8 +471,15 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
     /// Extracts the owned string representation of the last argument of a
     /// command, suitable for recording into `$_`.
-    fn take_last_arg(args: &[CommandArg]) -> Option<String> {
-        args.last().map(ToString::to_string)
+    fn take_last_arg(args: &[CommandArg]) -> Result<Option<String>, error::Error> {
+        let Some(arg) = args.last() else {
+            return Ok(None);
+        };
+        // The copy is one more the shell must be able to hold (see `crate::memory`).
+        if let CommandArg::String(arg) = arg {
+            crate::memory::reserve(crate::memory::text_bytes(arg))?;
+        }
+        Ok(Some(arg.to_string()))
     }
 
     /// The last argument of a command that has run, moved out of its arguments for `$_`.
@@ -573,7 +580,8 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
         // The builtin takes its arguments, so `$_` gets its own copy of the last.
         let last_arg = self
             .record_last_arg
-            .then(|| Self::take_last_arg(&self.args));
+            .then(|| Self::take_last_arg(&self.args))
+            .transpose()?;
         #[cfg(any(target_arch = "wasm32", test))]
         let mut cleanup = crate::shell::FrameGuard::new(
             &mut shell,
@@ -1234,7 +1242,7 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
     // Expansion still receives the captured output only after the producer completes.
     #[cfg(target_arch = "wasm32")]
     {
-        let (mut reader, writer) = openfiles::open_mem_pipe();
+        let (reader, writer) = openfiles::open_mem_pipe();
         params.set_fd(OpenFiles::STDOUT_FD, writer);
 
         // It is a process of its own, with its own `$BASHPID`.
@@ -1258,30 +1266,16 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
             }
             result
         };
-        // At most `MAX_SUBSTITUTION_BYTES` are kept; past that the reader closes, so the
-        // substitution's writers get SIGPIPE, and the substitution fails.
-        let read = async move {
-            use futures::io::AsyncReadExt;
-            let mut output = Vec::new();
-            let mut chunk = vec![0; 64 * 1024];
-            loop {
-                let count = reader.async_io().read(&mut chunk).await?;
-                if count == 0 {
-                    return Ok::<_, std::io::Error>((output, false));
-                }
-                if output.len() + count > openfiles::MAX_SUBSTITUTION_BYTES {
-                    drop(reader);
-                    return Ok((output, true));
-                }
-                output.extend_from_slice(&chunk[..count]);
-            }
-        };
+        // At most `MAX_SUBSTITUTION_BYTES` are kept, and no more than the shell's memory holds;
+        // past that the reader closes, so the substitution's writers get SIGPIPE, and the
+        // substitution fails.
+        let read = read_substitution_output(reader);
         let (cmd_result, output_result) = futures::join!(command, read);
-        let (output, truncated) = output_result?;
+        let (output, cut) = output_result?;
         let status = cmd_result?.exit_code.into();
-        if truncated {
+        if let Some(error) = cut {
             shell.set_last_exit_status(1);
-            return Err(error::ErrorKind::SubstitutionTooLarge.into());
+            return Err(error);
         }
         shell.set_last_exit_status(status);
         // The output is kept byte for byte, not required to be UTF-8 (see `rawbytes`).
@@ -1315,6 +1309,30 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
     }
 }
 
+/// Reads a substitution's output: all of it, or, with the error that ends the substitution, what
+/// came before the reader closed at `MAX_SUBSTITUTION_BYTES` or at the shell's memory budget.
+#[cfg(target_arch = "wasm32")]
+async fn read_substitution_output(
+    mut reader: OpenFile,
+) -> Result<(Vec<u8>, Option<error::Error>), std::io::Error> {
+    use futures::io::AsyncReadExt;
+    let mut output = Vec::new();
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        let count = reader.async_io().read(&mut chunk).await?;
+        if count == 0 {
+            return Ok((output, None));
+        }
+        if output.len() + count > openfiles::MAX_SUBSTITUTION_BYTES {
+            return Ok((output, Some(error::ErrorKind::SubstitutionTooLarge.into())));
+        }
+        if let Err(error) = crate::memory::reserve_growth(output.len(), output.capacity(), count) {
+            return Ok((output, Some(error)));
+        }
+        output.extend_from_slice(&chunk[..count]);
+    }
+}
+
 /// Runs a command string in the shell itself rather than a copy of it, as bash runs a
 /// `${ command; }` substitution, and returns what it wrote to its standard output.
 pub(crate) async fn invoke_command_in_current_shell_and_get_output(
@@ -1330,30 +1348,15 @@ pub(crate) async fn invoke_command_in_current_shell_and_get_output(
     // the substitution fails.
     #[cfg(target_arch = "wasm32")]
     let (cmd_result, output) = {
-        let (mut reader, writer) = openfiles::open_mem_pipe();
+        let (reader, writer) = openfiles::open_mem_pipe();
         params.set_fd(OpenFiles::STDOUT_FD, writer);
-        let read = async move {
-            use futures::io::AsyncReadExt;
-            let mut output = Vec::new();
-            let mut chunk = vec![0; 64 * 1024];
-            loop {
-                let count = reader.async_io().read(&mut chunk).await?;
-                if count == 0 {
-                    return Ok::<_, std::io::Error>((output, false));
-                }
-                if output.len() + count > openfiles::MAX_SUBSTITUTION_BYTES {
-                    drop(reader);
-                    return Ok((output, true));
-                }
-                output.extend_from_slice(&chunk[..count]);
-            }
-        };
+        let read = read_substitution_output(reader);
         let (cmd_result, output_result) =
             futures::join!(run_command_string(shell, params, command), read);
-        let (output, truncated) = output_result?;
-        if truncated {
+        let (output, cut) = output_result?;
+        if let Some(error) = cut {
             shell.set_last_exit_status(1);
-            return Err(error::ErrorKind::SubstitutionTooLarge.into());
+            return Err(error);
         }
         (cmd_result, crate::rawbytes::decode_vec(output))
     };
@@ -1455,12 +1458,15 @@ async fn run_substitution_command_in(
 
     // A command that does not parse (a prompt's, or one in backquotes, read only as it runs) is
     // reported as bash reports a substitution's: from `command substitution`, its lines numbered
-    // on from the command it is part of.
+    // on from the command it is part of. One too large to parse fails as a failed allocation
+    // ends a subshell.
     if let Err(error) = &parse_result {
-        let lines = brush_parser::bash_diagnostic(error, &command, &shell.parser_options());
-        let error = error::Error::from(error::ErrorKind::SyntaxError {
-            origin: "command substitution".to_owned(),
-            lines: error::shift_diagnostic_lines(lines, shell.line_number().saturating_sub(1)),
+        let error = crate::memory::refused_parse(error).unwrap_or_else(|| {
+            let lines = brush_parser::bash_diagnostic(error, &command, &shell.parser_options());
+            error::Error::from(error::ErrorKind::SyntaxError {
+                origin: "command substitution".to_owned(),
+                lines: error::shift_diagnostic_lines(lines, shell.line_number().saturating_sub(1)),
+            })
         });
         let _ = shell.display_error(&mut params.stderr(shell), &error);
         return Ok(ExecutionResult::new(2));

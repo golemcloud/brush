@@ -41,6 +41,9 @@ fn print_items(items: &[&ast::CompoundListItem], options: &ParserOptions) -> Str
 /// The text of a `$( )` whose command is `text` as bash keeps it: printed back when it parses,
 /// with a blank before a `(` so the result does not read as `$((`; `None` when it does not parse.
 pub fn reprint_comsub_text(text: &str, options: &ParserOptions) -> Option<String> {
+    if text.len() > crate::parser::MAX_CACHED_TEXT_LEN {
+        return reprint(text, options);
+    }
     cached_reprint(text, options)
 }
 
@@ -50,6 +53,10 @@ pub fn reprint_comsub_text(text: &str, options: &ParserOptions) -> Option<String
     convert = r#"{ (text.to_owned(), options.to_owned()) }"#
 )]
 fn cached_reprint(text: &str, options: &ParserOptions) -> Option<String> {
+    reprint(text, options)
+}
+
+fn reprint(text: &str, options: &ParserOptions) -> Option<String> {
     let program = Parser::new(text.as_bytes(), options).parse_program().ok()?;
     let printed = print_comsub(&program, options);
     Some(if printed.starts_with('(') {

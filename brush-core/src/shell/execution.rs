@@ -380,6 +380,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         source: Option<&str>,
         source_info: &crate::SourceInfo,
     ) -> error::Error {
+        if let Some(error) = crate::memory::refused_parse(&error) {
+            return error;
+        }
         let Some(source) = source else {
             return error::ErrorKind::ParseError(error, source_info.clone()).into();
         };
