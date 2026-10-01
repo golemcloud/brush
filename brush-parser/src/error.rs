@@ -106,8 +106,15 @@ pub enum WordParseError {
 
 /// Represents an error that occurred while parsing a (non-extended) test command.
 #[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub struct TestCommandParseError(#[from] peg::error::ParseError<usize>);
+pub enum TestCommandParseError {
+    /// The arguments do not form a test expression; holds bash's diagnostic.
+    #[error("{0}")]
+    Syntax(String),
+
+    /// Parentheses nest deeper than the parser can hold.
+    #[error("maximum nesting level exceeded: deeper nesting is unsupported in bash-tool")]
+    NestedTooDeeply,
+}
 
 /// Represents an error that occurred while parsing a key-binding specification.
 #[derive(Debug, thiserror::Error)]

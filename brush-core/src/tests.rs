@@ -19,11 +19,21 @@ pub fn eval_expr(
     match expr {
         brush_parser::ast::TestExpr::False => Ok(false),
         brush_parser::ast::TestExpr::Literal(s) => Ok(!s.is_empty()),
-        brush_parser::ast::TestExpr::And(left, right) => {
-            Ok(eval_expr(left, shell, params)? && eval_expr(right, shell, params)?)
+        // Bash evaluates every operand of `-a` and `-o`, so one that is invalid fails the test
+        // even after the others have decided it.
+        brush_parser::ast::TestExpr::And(operands) => {
+            let mut all = true;
+            for operand in operands {
+                all &= eval_expr(operand, shell, params)?;
+            }
+            Ok(all)
         }
-        brush_parser::ast::TestExpr::Or(left, right) => {
-            Ok(eval_expr(left, shell, params)? || eval_expr(right, shell, params)?)
+        brush_parser::ast::TestExpr::Or(operands) => {
+            let mut any = false;
+            for operand in operands {
+                any |= eval_expr(operand, shell, params)?;
+            }
+            Ok(any)
         }
         brush_parser::ast::TestExpr::Not(expr) => Ok(!eval_expr(expr, shell, params)?),
         brush_parser::ast::TestExpr::Parenthesized(expr) => eval_expr(expr, shell, params),

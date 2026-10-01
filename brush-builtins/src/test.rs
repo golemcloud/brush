@@ -45,24 +45,17 @@ impl builtins::Command for TestCommand {
             args = &args[0..args.len() - 1];
         }
 
-        let Ok(test_command) = brush_parser::test_command::parse(args) else {
-            context.report(syntax_error(args))?;
-            return Ok(ExecutionExitCode::InvalidUsage.into());
+        let test_command = match brush_parser::test_command::parse(args) {
+            Ok(test_command) => test_command,
+            Err(error) => {
+                context.report(error)?;
+                return Ok(ExecutionExitCode::InvalidUsage.into());
+            }
         };
         if tests::eval_expr(&test_command, context.shell, &context.params)? {
             Ok(ExecutionResult::success())
         } else {
             Ok(ExecutionResult::general_error())
         }
-    }
-}
-
-/// Why `test` could not read its arguments, as bash words it: with two arguments the first must
-/// be a unary operator, with three the second must be a binary operator.
-fn syntax_error(args: &[String]) -> String {
-    match args {
-        [first, _] => std::format!("{first}: unary operator expected"),
-        [_, second, _] => std::format!("{second}: binary operator expected"),
-        _ => "too many arguments".to_owned(),
     }
 }

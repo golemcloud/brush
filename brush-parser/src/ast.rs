@@ -2117,10 +2117,10 @@ pub enum TestExpr {
     False,
     /// A literal string.
     Literal(String),
-    /// Logical AND operation on two nested expressions.
-    And(Box<Self>, Box<Self>),
-    /// Logical OR operation on two nested expressions.
-    Or(Box<Self>, Box<Self>),
+    /// Logical AND operation on two or more expressions.
+    And(Vec<Self>),
+    /// Logical OR operation on two or more expressions.
+    Or(Vec<Self>),
     /// Logical NOT operation on a nested expression.
     Not(Box<Self>),
     /// A parenthesized expression.
@@ -2145,8 +2145,20 @@ impl Display for TestExpr {
         match self {
             Self::False => Ok(()),
             Self::Literal(s) => write!(f, "{s}"),
-            Self::And(left, right) => write!(f, "{left} -a {right}"),
-            Self::Or(left, right) => write!(f, "{left} -o {right}"),
+            Self::And(operands) | Self::Or(operands) => {
+                let separator = if matches!(self, Self::And(_)) {
+                    " -a "
+                } else {
+                    " -o "
+                };
+                for (index, operand) in operands.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(separator)?;
+                    }
+                    write!(f, "{operand}")?;
+                }
+                Ok(())
+            }
             Self::Not(expr) => write!(f, "! {expr}"),
             Self::Parenthesized(expr) => write!(f, "( {expr} )"),
             Self::UnaryTest(pred, word) => write!(f, "{pred} {word}"),
