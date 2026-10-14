@@ -309,6 +309,8 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
             last_background_pid: None,
             #[cfg(target_arch = "wasm32")]
             pending_stage_processes: std::collections::VecDeque::new(),
+            #[cfg(target_arch = "wasm32")]
+            commands_since_turn: std::cell::Cell::new(0),
         }
     }
 }

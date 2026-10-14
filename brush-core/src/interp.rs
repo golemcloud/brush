@@ -679,27 +679,24 @@ async fn execute_list(
     }
 }
 
-/// Commands a script runs between turns for the other tasks of the call.
+/// Commands a shell runs between turns for the other tasks of the call.
 #[cfg(target_arch = "wasm32")]
 const COMMANDS_PER_TURN: u32 = 64;
 
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    /// Commands run since the running script last gave the other tasks a turn.
-    static COMMANDS_SINCE_TURN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// Every [`COMMANDS_PER_TURN`] commands, lets the other tasks of the call run. On wasm32 every
-/// task shares one thread, so a loop of commands that never wait (`while :; do x=1; done`)
-/// would otherwise keep a timer from firing and a signal from being sent, and the signal from
-/// ending it: a signal ends a process only when its body next waits.
+/// Every [`COMMANDS_PER_TURN`] commands of `shell`, lets the other tasks of the call run. On
+/// wasm32 every task shares one thread, so a loop of commands that never wait
+/// (`while :; do x=1; done`) would otherwise keep a timer from firing and a signal from being
+/// sent, and the signal from ending it: a signal ends a process only when its body next waits.
+///
+/// Each shell counts its own commands. A pipeline stage starts its count anew, and the shell
+/// that runs the pipeline keeps its own, so a loop that starts a pipeline in each round
+/// (`while :; do echo 1 | cat; done`) still gives the other tasks a turn.
 #[cfg(target_arch = "wasm32")]
 async fn give_other_tasks_a_turn(shell: &Shell<impl extensions::ShellExtensions>) {
-    let due = COMMANDS_SINCE_TURN.with(|count| {
-        let next = count.get() + 1;
-        count.set(if next >= COMMANDS_PER_TURN { 0 } else { next });
-        next >= COMMANDS_PER_TURN
-    });
+    let count = shell.commands_since_turn();
+    let next = count.get() + 1;
+    let due = next >= COMMANDS_PER_TURN;
+    count.set(if due { 0 } else { next });
     if due {
         (shell.execution_services().yield_now)().await;
     }
@@ -1394,7 +1391,7 @@ fn spawn_pipeline_stage<SE: extensions::ShellExtensions>(
         // A stage starts with a whole turn, as a new process starts with a whole time slice: a
         // short stage that writes less than a pipe holds finishes before the stage reading it
         // runs, as in bash (`for i in 1 2 3; do echo $i; done | head -n 1` gets no SIGPIPE).
-        COMMANDS_SINCE_TURN.with(|count| count.set(0));
+        shell.commands_since_turn().set(0);
         let completed = std::cell::Cell::new(false);
         let body = async {
             let context = PipelineExecutionContext {

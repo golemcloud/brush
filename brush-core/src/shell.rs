@@ -291,6 +291,12 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(feature = "serde", serde(skip))]
     pending_stage_processes: std::collections::VecDeque<crate::execution::process::NumberedProcess>,
+
+    /// Commands this shell has run since it last gave the other tasks a turn. Each shell counts
+    /// its own, as each process has its own time slice.
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    commands_since_turn: std::cell::Cell<u32>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -360,6 +366,9 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
             last_background_pid: self.last_background_pid,
             #[cfg(target_arch = "wasm32")]
             pending_stage_processes: std::collections::VecDeque::new(),
+            // A subshell goes on in the turn of its parent; a pipeline stage starts a new one.
+            #[cfg(target_arch = "wasm32")]
+            commands_since_turn: self.commands_since_turn.clone(),
         };
         // A subshell reseeds RANDOM before its first value, as bash does.
         if let Some((_, random)) = shell.env.get_raw("RANDOM") {
@@ -431,6 +440,12 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
         &mut self,
     ) -> Option<crate::execution::process::NumberedProcess> {
         self.pending_stage_processes.pop_front()
+    }
+
+    /// Commands this shell has run since it last gave the other tasks a turn.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const fn commands_since_turn(&self) -> &std::cell::Cell<u32> {
+        &self.commands_since_turn
     }
 
     /// Returns this shell's execution services, inherited by cloned subshells.
