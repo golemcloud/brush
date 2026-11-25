@@ -804,11 +804,7 @@ fn here_documents_len(text: &str) -> Option<usize> {
                 if tag.is_empty() {
                     return None;
                 }
-                let delimiter: String = tag
-                    .chars()
-                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-                    .collect();
-                delimiters.push((delimiter, strip));
+                delimiters.push((crate::tokenizer::unquote_str(tag), strip));
                 continue;
             }
             b'\\' => index += 1,
@@ -1996,6 +1992,14 @@ mod tests {
             ),
             ("$(cat <<A | tr a b\n)(\nA\n)", "cat <<A | tr a b\n)(\nA\n"),
             ("$(cat <<<'(' )", "cat <<<'(' "),
+            // The delimiter is the tag with its quotes removed, as the shell removes them.
+            ("$(cat <<E\\\\F\nE\\F\n)", "cat <<E\\\\F\nE\\F\n"),
+            ("$(cat <<'A\"B'\n)\nA\"B\n)", "cat <<'A\"B'\n)\nA\"B\n"),
+            ("$(cat <<\"A'B\"\n)\nA'B\n)", "cat <<\"A'B\"\n)\nA'B\n"),
+            (
+                "$(cat <<\"A\\\\B\"\n)\nA\\B\n)",
+                "cat <<\"A\\\\B\"\n)\nA\\B\n",
+            ),
         ] {
             let pieces = super::parse(word, &ParserOptions::default())?;
             assert_matches!(

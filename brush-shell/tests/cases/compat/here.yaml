@@ -251,6 +251,17 @@ cases:
       EOF
       )
 
+  - name: "Here doc with escaped backslash and quotes in delimiters inside command substitution"
+    stdin: |
+      echo "$(cat <<E\\F
+      )
+      E\F
+      )"
+      echo "$(cat <<'A"B'
+      )
+      A"B
+      )"
+
   - name: "Here doc with unpaired single quote in command substitution"
     stdin: |
       echo "$(cat <<'EOF'
