@@ -114,10 +114,14 @@ impl Regex {
 
         if back_references {
             // musl matches a back-reference by backtracking, which reads a byte that is no
-            // character as it reads any other.
-            return Ok(re
-                .captures(value)?
-                .map(|captures| shell_values(captures.iter().map(|c| c.map(|m| m.as_str())))));
+            // character as it reads any other. The match is on the shell string itself, so its
+            // captures are shell strings already.
+            return Ok(re.captures(value)?.map(|captures| {
+                captures
+                    .iter()
+                    .map(|c| c.map(|m| m.as_str().to_owned()))
+                    .collect()
+            }));
         }
         // musl's other matcher reads the value one character at a time, one past the character
         // it matches, until no match can go further; reaching a byte that is not UTF-8 ends it
@@ -473,6 +477,17 @@ mod tests {
         assert_eq!(matched("^$", b"\xff"), None);
         // A back-reference is matched by backtracking, which reads such a byte as any other.
         assert_eq!(matched(r"(a)\1", b"\xffaa"), Some("aa".to_owned()));
+        // Its captures are the bytes themselves, the whole match and each group alike.
+        let captures = Regex::from(vec![RegexPiece::Pattern(r"^(.)\1$".to_owned())])
+            .matches(&rawbytes::decode(b"\xff\xff"))
+            .unwrap();
+        assert_eq!(
+            captures,
+            Some(vec![
+                Some(rawbytes::decode(b"\xff\xff").into_owned()),
+                Some(rawbytes::decode(b"\xff").into_owned()),
+            ])
+        );
         // Valid UTF-8 for a character in the range that stands for bytes is that character.
         let private = "\u{10FF80}".as_bytes();
         assert_eq!(

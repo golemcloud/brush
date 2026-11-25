@@ -613,3 +613,12 @@ cases:
       t=$' \t\nabc \t\n'
       re=$'[ \t\n]+$'
       [[ $t =~ $re ]] && printf '[%s]\n' "${t::${#t}-${#BASH_REMATCH}}"
+
+  - name: "Regex back-reference captures keep raw bytes"
+    stdin: |
+      v=$'\xff\xff'
+      re='^(.)\1$'
+      [[ $v =~ $re ]] && echo matched
+      [[ ${BASH_REMATCH[0]} == "$v" ]] && echo "whole match"
+      [[ ${BASH_REMATCH[1]} == $'\xff' ]] && echo "group"
+      env printf '%s' "${BASH_REMATCH[@]}" | od -An -tx1
