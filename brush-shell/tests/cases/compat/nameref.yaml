@@ -327,6 +327,24 @@ cases:
       declare -n u='m[i]' w='m[1+0]'
       echo "$((u)) $((w))"
 
+  - name: "Nameref to array element - arithmetic assignment evaluates the subscript"
+    stdin: |
+      arr=(1 2 3 4)
+      i=1
+      declare -n r='arr[i]'
+      (( r += 10 ))
+      echo "${arr[*]}"
+      let 'r = r * 2'
+      echo "${arr[*]}"
+      j=0
+      declare -n t='arr[j++]'
+      (( t += 100 ))
+      echo "${arr[*]} j=$j"
+      declare -A m=([i]=9)
+      declare -n u='m[i]'
+      (( u += 1 ))
+      echo "${m[i]}"
+
   - name: "Nameref to array element - string append"
     known_failure: true
     stdin: |

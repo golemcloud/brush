@@ -700,6 +700,11 @@ fn assign(
     }
     match lvalue {
         ast::ArithmeticTarget::Variable(name) => {
+            // A nameref to an array element assigns that element, with its subscript evaluated
+            // as any element's is.
+            if let Some((base, index)) = shell.env().resolve_nameref_element(name.as_str()) {
+                return assign_element(shell, &base, &index, value, depth);
+            }
             shell
                 .env_mut()
                 .update_or_add(
@@ -710,37 +715,48 @@ fn assign(
                     env::EnvironmentScope::Global,
                 )
                 .map_err(|error| assignment_error(&error))?;
+            Ok(value)
         }
         ast::ArithmeticTarget::ArrayElement(name, index) => {
-            // Bash reports an element it cannot assign, and goes on.
-            if !is_associative(shell, name) && matches!(index.as_str(), "@" | "*") {
-                report(shell, &format!("{name}[{index}]: bad array subscript"));
-                return Ok(value);
-            }
-            let index_str = element_key(shell, name, index, depth)?;
-
-            let assigned = shell.env_mut().update_or_add_array_element(
-                name.as_str(),
-                index_str.clone(),
-                value.to_string(),
-                |_| Ok(()),
-                env::EnvironmentLookup::Anywhere,
-                env::EnvironmentScope::Global,
-            );
-            match assigned {
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        crate::error::ErrorKind::ArrayIndexOutOfRange(_)
-                    ) =>
-                {
-                    report(shell, &format!("{name}[{index_str}]: bad array subscript"));
-                }
-                assigned => assigned.map_err(|error| assignment_error(&error))?,
-            }
+            assign_element(shell, name, index, value, depth)
         }
     }
+}
 
+/// Assigns `value` to `name[index]`.
+fn assign_element(
+    shell: &mut Shell<impl extensions::ShellExtensions>,
+    name: &str,
+    index: &str,
+    value: i64,
+    depth: u32,
+) -> Result<i64, EvalError> {
+    // Bash reports an element it cannot assign, and goes on.
+    if !is_associative(shell, name) && matches!(index, "@" | "*") {
+        report(shell, &format!("{name}[{index}]: bad array subscript"));
+        return Ok(value);
+    }
+    let index_str = element_key(shell, name, index, depth)?;
+
+    let assigned = shell.env_mut().update_or_add_array_element(
+        name,
+        index_str.clone(),
+        value.to_string(),
+        |_| Ok(()),
+        env::EnvironmentLookup::Anywhere,
+        env::EnvironmentScope::Global,
+    );
+    match assigned {
+        Err(error)
+            if matches!(
+                error.kind(),
+                crate::error::ErrorKind::ArrayIndexOutOfRange(_)
+            ) =>
+        {
+            report(shell, &format!("{name}[{index_str}]: bad array subscript"));
+        }
+        assigned => assigned.map_err(|error| assignment_error(&error))?,
+    }
     Ok(value)
 }
 
