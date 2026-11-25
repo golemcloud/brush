@@ -314,6 +314,19 @@ cases:
       (( ref = ref * 2 ))
       echo "arr[2]: ${arr[2]}"
 
+  - name: "Nameref to array element - arithmetic read evaluates the subscript"
+    stdin: |
+      arr=(10 20 30)
+      i=1
+      declare -n r='arr[i]' s='arr[i+1]'
+      echo "$((r)) $((s)) $((r * 2))"
+      j=0
+      declare -n t='arr[j++]'
+      echo "$((t)) j=$j"
+      declare -A m=([i]=9 ['1+0']=4)
+      declare -n u='m[i]' w='m[1+0]'
+      echo "$((u)) $((w))"
+
   - name: "Nameref to array element - string append"
     known_failure: true
     stdin: |

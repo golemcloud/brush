@@ -475,24 +475,6 @@ fn get_var_value<'a>(
     shell: &'a Shell<impl extensions::ShellExtensions>,
     name: &str,
 ) -> Result<Cow<'a, str>, EvalError> {
-    // A nameref to an array element (`declare -n ref='arr[1]'`) reads that element.
-    let target = shell.env().resolve_nameref(name);
-    if let Some((base, index)) = target
-        .strip_suffix(']')
-        .and_then(|target| target.split_once('['))
-    {
-        let element = shell.env().get(base).and_then(|(_, var)| {
-            var.value()
-                .get_at(index, shell)
-                .ok()
-                .flatten()
-                .map(|value| value.to_string())
-        });
-        if let Some(element) = element {
-            return Ok(element.into());
-        }
-    }
-
     let value = shell.env_var(name).map(|var| var.resolve_value(shell));
 
     if let Some(value) = value
@@ -519,7 +501,17 @@ fn deref_lvalue(
         ast::ArithmeticTarget::ArrayElement(name, _) => shell.note_circular_nameref(name, 2, false),
     }
     let value_str: Cow<'_, str> = match lvalue {
-        ast::ArithmeticTarget::Variable(name) => get_var_value(shell, name.as_str())?,
+        // A nameref to an array element (`declare -n ref='arr[i]'`) reads that element, with its
+        // subscript evaluated as any element's is.
+        ast::ArithmeticTarget::Variable(name) => {
+            match shell.env().resolve_nameref_element(name.as_str()) {
+                Some((base, index)) => match read_element(shell, &base, &index, depth)? {
+                    Some(element) => Cow::Owned(element),
+                    None => get_var_value(shell, name.as_str())?,
+                },
+                None => get_var_value(shell, name.as_str())?,
+            }
+        }
         ast::ArithmeticTarget::ArrayElement(name, index) => {
             read_element(shell, name, index, depth)?.map_or(Cow::Borrowed(""), Cow::Owned)
         }
