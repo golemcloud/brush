@@ -19,12 +19,12 @@ impl builtins::Command for ReturnCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         if context.shell.in_function() || context.shell.in_sourced_script() {
-            let code_8bit = match crate::exit::status_operand(&context, &self.code)? {
-                crate::exit::StatusOperand::Status(code) => code,
-                crate::exit::StatusOperand::None => context.shell.last_exit_status(),
-                crate::exit::StatusOperand::NotANumber => 2,
+            let code_8bit = match crate::status_operand::status_operand(&context, &self.code)? {
+                crate::status_operand::StatusOperand::Status(code) => code,
+                crate::status_operand::StatusOperand::None => context.shell.last_exit_status(),
+                crate::status_operand::StatusOperand::NotANumber => 2,
                 // As in bash, more than one operand ends the shell, with status 1.
-                crate::exit::StatusOperand::TooMany => {
+                crate::status_operand::StatusOperand::TooMany => {
                     let mut result = ExecutionResult::new(1);
                     result.next_control_flow = ExecutionControlFlow::ExitShell;
                     return Ok(result);

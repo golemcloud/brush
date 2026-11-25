@@ -129,6 +129,8 @@ mod builder;
 mod factory;
 #[cfg(any(feature = "builtin.command", feature = "builtin.type"))]
 mod lookup;
+#[cfg(any(feature = "builtin.exit", feature = "builtin.return"))]
+mod status_operand;
 #[cfg(not(feature = "builtin.exit"))]
 mod unimp;
 
