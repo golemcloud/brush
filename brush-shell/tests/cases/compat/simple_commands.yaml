@@ -90,3 +90,11 @@ cases:
       # ...and the shell remembers it, even though it could not be run.
       hash -t only | sed "s|^$PWD/||"
       echo "Result: ${PIPESTATUS[0]}"
+
+  - name: "External command arguments and exported values keep raw bytes"
+    stdin: |
+      x=$'\xff'
+      env printf '%s|%s' "$x" $'a\x80b' | od -An -tx1
+      export Y=$'a\xfeb'
+      env | grep -a '^Y=' | od -An -tx1
+      (exec env printf '%s' "$x") | od -An -tx1

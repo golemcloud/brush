@@ -2,7 +2,6 @@
 
 use std::{
     borrow::Cow,
-    ffi::OsStr,
     fmt::Display,
     path::{Path, PathBuf},
     process::Stdio,
@@ -22,7 +21,7 @@ use crate::{
     functions,
     interp::{self, Execute, ProcessGroupPolicy},
     openfiles::{self, OpenFile, OpenFiles},
-    pathsearch, processes,
+    pathsearch, processes, rawbytes,
     results::ExecutionSpawnResult,
     sys, trace_categories, traps,
 };
@@ -187,21 +186,21 @@ impl<SE: extensions::ShellExtensions> std::ops::DerefMut for ShellForCommand<'_,
 /// * `empty_env` - If true, the command will be executed with an empty environment; if false, the
 ///   command will inherit environment variables marked as exported in the provided `Shell`.
 #[allow(unused_variables, reason = "argv0 is only used on unix platforms")]
-pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
+pub fn compose_std_command<S: AsRef<str>, SE: extensions::ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     command_name: &str,
     argv0: &str,
     args: &[S],
     empty_env: bool,
 ) -> Result<std::process::Command, error::Error> {
-    let mut cmd = std::process::Command::new(command_name);
+    let mut cmd = std::process::Command::new(rawbytes::to_os_string(command_name));
 
     // Override argv[0].
     // NOTE: Not supported on all platforms.
-    cmd.arg0(argv0);
+    cmd.arg0(rawbytes::to_os_string(argv0));
 
-    // Pass through args.
-    cmd.args(args);
+    // Pass through args, as the bytes they stand for.
+    cmd.args(args.iter().map(|arg| rawbytes::to_os_string(arg.as_ref())));
 
     // Use the shell's current working dir.
     cmd.current_dir(context.shell.working_dir());
@@ -216,11 +215,14 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
             // that are set (i.e., have a value). This means a variable that
             // shows up in `declare -p` but has no *set* value will be omitted.
             if v.value().is_set() {
-                cmd.env(k.as_str(), v.value().to_cow_str(context.shell).as_ref());
+                cmd.env(
+                    k.as_str(),
+                    rawbytes::to_os_string(&v.value().to_cow_str(context.shell)),
+                );
             }
         }
         // Set _ to the resolved command path for external commands.
-        cmd.env("_", command_name);
+        cmd.env("_", rawbytes::to_os_string(command_name));
     }
 
     // Add in exported functions.
@@ -229,7 +231,7 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
             if registration.is_exported() {
                 let var_name = std::format!("BASH_FUNC_{func_name}%%");
                 let value = std::format!("() {}", registration.definition().body);
-                cmd.env(var_name, value);
+                cmd.env(var_name, rawbytes::to_os_string(&value));
             }
         }
     }
