@@ -1865,10 +1865,11 @@ fn is_valid_name(s: &str) -> bool {
 /// assignment: after a control operator or a reserved word that starts a command, or after an
 /// assignment in that position.
 fn starts_command_words(token: &str, is_operator: bool, command_position: bool) -> bool {
+    // A case pattern, not a command, follows `;;`, `;&` and `;;&`.
     if is_operator {
         return matches!(
             token,
-            ";" | "&" | "&&" | "||" | "|" | "|&" | "(" | ")" | "\n" | ";;" | ";&" | ";;&"
+            ";" | "&" | "&&" | "||" | "|" | "|&" | "(" | ")" | "\n"
         );
     }
     if matches!(
