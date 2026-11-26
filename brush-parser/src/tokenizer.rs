@@ -1789,6 +1789,10 @@ impl CaseTracker {
         match token {
             Token::Word(word, _) => {
                 let word = word.trim_matches(is_blank);
+                // Blanks kept between the words separate them; they are not a word.
+                if word.is_empty() {
+                    return;
+                }
                 match (self.open.last(), word) {
                     (_, "case") if self.command_start => self.open.push(CaseState::ExpectIn),
                     (Some(CaseState::ExpectIn), "in") => {

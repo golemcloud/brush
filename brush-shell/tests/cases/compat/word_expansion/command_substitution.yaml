@@ -264,3 +264,12 @@ cases:
       echo $(echo case)esac
       echo "$(echo a; case b in b) case c in c) echo nested;; esac;; esac)"
       echo $( if true; then case z in z) echo t;; esac; fi)
+
+  - name: "Command substitution with a case command after blanks"
+    stdin: |
+      x=$(  case a in a) echo s1;; esac); echo "$x"
+      x=$(echo a;  case a in a) echo s2;; esac); echo "$x"
+      x=$(
+        case a in a) echo s3;; esac
+      )
+      echo "$x"
