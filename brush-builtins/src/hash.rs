@@ -101,18 +101,19 @@ impl builtins::Command for HashCommand {
             if self.display_as_usable_input {
                 // `hash -l` lists the table as commands that would rebuild it.
                 for (name, path) in cache.entries() {
-                    writeln!(
-                        context.stdout(),
-                        "builtin hash -p {} {name}",
-                        path.display()
-                    )?;
+                    let path = rawbytes::from_os_str(path.as_os_str());
+                    let line = format!("builtin hash -p {path} {name}\n");
+                    context.stdout().write_all(&rawbytes::encode(&line))?;
                 }
             } else if cache.is_empty() {
                 writeln!(context.stdout(), "hash: hash table empty")?;
             } else {
                 writeln!(context.stdout(), "hits\tcommand")?;
                 for (_, path) in cache.entries() {
-                    writeln!(context.stdout(), "   0\t{}", path.display())?;
+                    let mut line = b"   0\t".to_vec();
+                    line.extend_from_slice(path.as_os_str().as_encoded_bytes());
+                    line.push(b'\n');
+                    context.stdout().write_all(&line)?;
                 }
             }
         } else {
