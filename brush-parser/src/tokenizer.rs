@@ -1531,7 +1531,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 } else {
                     self.cross_state.compound_assignment
                 }
-                && matches!(self.peek_second_char(), Ok(Some('(')))
+                && self.peek_second_char()? == Some('(')
             {
                 self.consume_char()?;
                 state.append_char(c);
@@ -2764,6 +2764,23 @@ HERE2
             let text = format!("echo {}x{}", open.repeat(100), close.repeat(100));
             assert!(uncached_tokenize_str(&text, &options).is_ok(), "{open}");
         }
+    }
+
+    #[test]
+    fn tokenizing_stops_where_the_parse_budget_says_after_a_lookahead() {
+        // The same budget as below: only the first one set applies.
+        set_parse_budget(|tokens, _| tokens < 100_000);
+        // The budget is next checked at the `<`, which is read to see whether `(` follows it.
+        let check = 49 * CHARS_PER_BUDGET_CHECK;
+        let text = format!(
+            "{}{}=<(true)",
+            "x ".repeat(100_000),
+            "y".repeat(check - 200_000 - 2)
+        );
+        assert!(matches!(
+            uncached_tokenize_str(&text, &TokenizerOptions::default()),
+            Err(TokenizerError::TooLarge { chars, .. }) if chars == check
+        ));
     }
 
     #[test]
