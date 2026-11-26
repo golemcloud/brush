@@ -273,3 +273,10 @@ cases:
         case a in a) echo s3;; esac
       )
       echo "$x"
+
+  - name: "Command substitution with many adjacent quoted fragments"
+    timeout_in_seconds: 10
+    stdin: |
+      q="''"; c="''case"
+      eval "x=\$(echo a$(printf "$q%.0s" {1..20000}))"; echo "${#x}"
+      eval "y=\$(echo a$(printf "$c%.0s" {1..10000}))"; echo "${#y}"

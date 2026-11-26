@@ -700,14 +700,30 @@ fn starts_command(before: &str) -> bool {
         Some(';') => !before.ends_with(";;"),
         Some('&') => !before.ends_with(";&"),
         Some(_) => {
-            let word = before
-                .rsplit([' ', '\t', '\n', ';', '&', '|', '(', ')'])
-                .next()
-                .unwrap_or_default();
-            word.ends_with("${")
+            // A reserved word is at most five bytes long, so only the end of the text is read.
+            let bytes = before.as_bytes();
+            let tail = &bytes[bytes.len().saturating_sub(6)..];
+            let word = match tail
+                .iter()
+                .rposition(|b| matches!(b, b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')'))
+            {
+                Some(separator) => &tail[separator + 1..],
+                None if tail.len() == bytes.len() => tail,
+                None => return before.ends_with("${"),
+            };
+            before.ends_with("${")
                 || matches!(
                     word,
-                    "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "{" | "!" | "time"
+                    b"then"
+                        | b"do"
+                        | b"else"
+                        | b"elif"
+                        | b"if"
+                        | b"while"
+                        | b"until"
+                        | b"{"
+                        | b"!"
+                        | b"time"
                 )
         }
     }
@@ -1677,7 +1693,7 @@ peg::parser! {
         // own and a `case` command is seen where it starts.
         pub(crate) rule command_piece() -> () =
             here_documents() {} /
-            command_start() case_command() {} /
+            &"case" command_start() case_command() {} /
             word_piece(<command_piece_stop()>, true /*in_command*/) {} /
             ([' ' | '\t' | '\n' | ';' | '&' | '|'])+ {} /
             ['\'' | '`'] {}
@@ -1693,7 +1709,7 @@ peg::parser! {
 
         rule case_command_piece() =
             here_documents() {} /
-            command_start() case_command() /
+            &"case" command_start() case_command() /
             word_piece(<case_command_stop()>, true /*in_command*/) {} /
             [_] {}
 
@@ -1723,7 +1739,7 @@ peg::parser! {
         // group or brace expression of its own.
         rule funsub_piece() =
             here_documents() {} /
-            command_start() case_command() /
+            &"case" command_start() case_command() /
             "{" (!"}" funsub_piece())* "}" {} /
             word_piece(<funsub_stop()>, true /*in_command*/) {} /
             [' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')'] {}
