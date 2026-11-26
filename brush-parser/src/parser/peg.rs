@@ -875,12 +875,12 @@ fn negated(bangs: usize, expr: ast::ExtendedTestExpr) -> ast::ExtendedTestExpr {
 
 /// `text` without its line continuations: a backslash-newline that no other backslash escapes,
 /// outside single quotes and ANSI-C quotes. As in bash, a command substitution `$(...)` quotes
-/// on its own, even inside double quotes, and backquotes take quotes as text.
-fn without_line_continuations(text: &str) -> String {
+/// on its own, even inside double quotes; it ends where the tokenizer finds its `)` (past the
+/// `)` of a case pattern, or a quote in a comment), and its text loses its own continuations.
+/// Backquotes take quotes as text.
+fn without_line_continuations(text: &str, options: &crate::TokenizerOptions) -> String {
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Context {
-        /// Commands, at the top or in `$(...)`, with the parentheses open in them.
-        Command(usize),
+    enum Quote {
         Double,
         Single,
         AnsiC,
@@ -891,53 +891,56 @@ fn without_line_continuations(text: &str) -> String {
         return text.to_owned();
     }
     let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    let mut contexts = vec![Context::Command(0)];
-    while let Some(c) = chars.next() {
-        let context = *contexts.last().unwrap_or(&Context::Command(0));
-        match (context, c) {
-            (Context::Single | Context::AnsiC, '\'')
-            | (Context::Double, '"')
-            | (Context::Backquote, '`') => {
-                contexts.pop();
+    let mut quotes = vec![];
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        rest = rest.get(c.len_utf8()..).unwrap_or_default();
+        let quote = quotes.last().copied();
+        match (quote, c) {
+            (Some(Quote::Single | Quote::AnsiC), '\'')
+            | (Some(Quote::Double), '"')
+            | (Some(Quote::Backquote), '`') => {
+                quotes.pop();
             }
-            (Context::Single, _) => {}
+            (Some(Quote::Single), _) => {}
             (_, '\\') => {
-                if context != Context::AnsiC && chars.peek() == Some(&'\n') {
-                    chars.next();
+                if quote != Some(Quote::AnsiC)
+                    && let Some(after) = rest.strip_prefix('\n')
+                {
+                    rest = after;
                     continue;
                 }
                 result.push(c);
-                result.extend(chars.next());
+                if let Some(next) = rest.chars().next() {
+                    result.push(next);
+                    rest = rest.get(next.len_utf8()..).unwrap_or_default();
+                }
                 continue;
             }
-            (Context::AnsiC | Context::Backquote, _) => {}
-            (Context::Command(_) | Context::Double, '`') => contexts.push(Context::Backquote),
-            (Context::Command(_) | Context::Double, '$') if chars.peek() == Some(&'(') => {
-                result.push(c);
-                result.extend(chars.next());
-                contexts.push(Context::Command(0));
+            (Some(Quote::AnsiC | Quote::Backquote), _) => {}
+            (None | Some(Quote::Double), '`') => quotes.push(Quote::Backquote),
+            (None | Some(Quote::Double), '$')
+                if rest.starts_with('(') && !rest.starts_with("((") =>
+            {
+                let inner = rest.get(1..).unwrap_or_default();
+                if let Ok(len) = crate::tokenizer::command_substitution_len(inner, options)
+                    && let Some(command) = inner.get(..len.saturating_sub(1))
+                {
+                    result.push_str("$(");
+                    result.push_str(&without_line_continuations(command, options));
+                    result.push(')');
+                    rest = inner.get(len..).unwrap_or_default();
+                    continue;
+                }
+            }
+            (None, '$') if rest.starts_with('\'') => {
+                result.push_str("$'");
+                rest = rest.get(1..).unwrap_or_default();
+                quotes.push(Quote::AnsiC);
                 continue;
             }
-            (Context::Command(_), '$') if chars.peek() == Some(&'\'') => {
-                result.push(c);
-                result.extend(chars.next());
-                contexts.push(Context::AnsiC);
-                continue;
-            }
-            (Context::Command(_), '\'') => contexts.push(Context::Single),
-            (Context::Command(_), '"') => contexts.push(Context::Double),
-            (Context::Command(parens), '(') => {
-                contexts.pop();
-                contexts.push(Context::Command(parens + 1));
-            }
-            (Context::Command(parens), ')') if parens > 0 => {
-                contexts.pop();
-                contexts.push(Context::Command(parens - 1));
-            }
-            (Context::Command(0), ')') if contexts.len() > 1 => {
-                contexts.pop();
-            }
+            (None, '\'') => quotes.push(Quote::Single),
+            (None, '"') => quotes.push(Quote::Double),
             _ => {}
         }
         result.push(c);
@@ -956,7 +959,7 @@ impl Tokens<'_> {
     fn source_text(&self, from: usize, to: usize) -> Option<String> {
         let source = self.source?;
         let text = source.get(self.byte_offset(from)?..self.byte_offset(to)?)?;
-        Some(without_line_continuations(text))
+        Some(without_line_continuations(text, &self.options))
     }
 
     /// The source text after the token `from` and before the token `to`.

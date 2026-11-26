@@ -654,3 +654,16 @@ cases:
       f() { [[ ab =~ "$(printf %s 'a\
       b')" ]]; }
       declare -f f
+
+  - name: "Regex with a line continuation after a case or a comment in a substitution"
+    stdin: |
+      [[ ab =~ "$(case x in x) printf %s 'a\
+      b';; esac)" ]] && echo m1 || echo n1
+      [[ xab =~ "$(echo x # don't
+      )"a\
+      b ]] && echo m2 || echo n2
+      [[ ab =~ "$(echo "a\
+      b")" ]] && echo m3 || echo n3
+      (( z = $(echo 1 +\
+      2) + $((1 +\
+      1)) )); echo "z=$z"

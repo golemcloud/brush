@@ -237,14 +237,21 @@ pub(crate) struct Tokens<'a> {
     /// length of `source`, built when first needed; `None` when `source` is unknown or ASCII,
     /// where the two agree.
     char_starts: std::cell::OnceCell<Option<Vec<usize>>>,
+    /// The options the tokens were read with, to read the source again.
+    pub options: TokenizerOptions,
 }
 
 impl<'a> Tokens<'a> {
-    pub const fn new(tokens: &'a [Token], source: Option<&'a str>) -> Self {
+    pub const fn new(
+        tokens: &'a [Token],
+        source: Option<&'a str>,
+        options: TokenizerOptions,
+    ) -> Self {
         Self {
             tokens,
             source,
             char_starts: std::cell::OnceCell::new(),
+            options,
         }
     }
 
