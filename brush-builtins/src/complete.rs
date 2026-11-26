@@ -574,8 +574,11 @@ impl builtins::Command for CompGenCommand {
                         brush_core::env::EnvironmentScope::Global,
                     )?;
                 } else {
+                    // A candidate holds the bytes it stands for (see `rawbytes`).
                     for candidate in candidates {
-                        writeln!(context.stdout(), "{candidate}")?;
+                        let mut line = brush_core::rawbytes::encode(&candidate).into_owned();
+                        line.push(b'\n');
+                        context.stdout().write_all(&line)?;
                     }
                 }
                 // We are expected to return 1 if there are no candidates, even if no errors

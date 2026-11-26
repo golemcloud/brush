@@ -1,6 +1,6 @@
 //! Shell patterns
 
-use crate::{error, regex, sys, trace_categories};
+use crate::{error, rawbytes, regex, sys, trace_categories};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -324,7 +324,7 @@ impl Pattern {
             // also uses `/` on Windows (to avoid `PathBuf::push` drive-letter
             // semantics) — if we left `\` here, the strip_prefix below would
             // miss on Windows and leave results as absolute paths.
-            let working_dir_str = working_dir.to_string_lossy();
+            let working_dir_str = rawbytes::from_os_str(working_dir.as_os_str());
             let mut working_dir_str =
                 sys::fs::normalize_path_separators(&working_dir_str).into_owned();
             if !working_dir_str.ends_with('/') {
@@ -359,12 +359,11 @@ impl Pattern {
                     } else if matched_so_far {
                         found.push(current_path.clone());
                     } else if index > 0 || absolute {
-                        let written = current_path.display().to_string();
-                        found.push(PathBuf::from(if written.ends_with('/') {
-                            written
-                        } else {
-                            std::format!("{written}/")
-                        }));
+                        let mut written = current_path.clone().into_os_string();
+                        if !written.as_encoded_bytes().ends_with(b"/") {
+                            written.push("/");
+                        }
+                        found.push(PathBuf::from(written));
                     }
                     walk_for_globstar(&current_path, !last, allow_dot_files, &mut found);
                     paths_so_far.append(&mut found);
@@ -410,13 +409,13 @@ impl Pattern {
                     || subpattern_starts_with_dot;
 
                 let matches_dotfile_policy = |dir_entry: &std::fs::DirEntry| {
-                    !dir_entry.file_name().to_string_lossy().starts_with('.') || allow_dot_files
+                    !dir_entry.file_name().as_encoded_bytes().starts_with(b".") || allow_dot_files
                 };
 
                 let regex = subpattern.to_regex(true, true)?;
                 let matches_regex = |dir_entry: &std::fs::DirEntry| {
                     regex
-                        .is_match(dir_entry.file_name().to_string_lossy().as_ref())
+                        .is_match(rawbytes::from_os_str(&dir_entry.file_name()).as_ref())
                         .unwrap_or(false)
                 };
 
@@ -453,7 +452,7 @@ impl Pattern {
                 // prefix so that `prefix_to_remove` (already normalized to
                 // use `/`) matches paths that may contain a mix of `\` and
                 // `/` on Windows.
-                let path_str = path.to_string_lossy();
+                let path_str = rawbytes::from_os_str(path.as_os_str());
                 let normalized = sys::fs::normalize_path_separators(&path_str);
                 let mut path_ref: &str = normalized.as_ref();
 
@@ -590,7 +589,7 @@ fn walk_for_globstar(
                 entries
                     .filter_map(Result::ok)
                     .filter(|entry| {
-                        allow_dot_files || !entry.file_name().to_string_lossy().starts_with('.')
+                        allow_dot_files || !entry.file_name().as_encoded_bytes().starts_with(b".")
                     })
                     .map(|entry| {
                         let is_dir = entry.file_type().is_ok_and(|file_type| file_type.is_dir());

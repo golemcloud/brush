@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use brush_core::builtins;
 use clap::Parser;
@@ -24,7 +24,8 @@ impl DotCommand {
         script_path: &str,
         shell: &brush_core::Shell<SE>,
     ) -> PathBuf {
-        let path = Path::new(script_path);
+        let path = brush_core::rawbytes::to_path(script_path);
+        let path = path.as_path();
         if !shell.options().source_builtin_searches_path || script_path.contains('/') {
             return path.to_path_buf();
         }

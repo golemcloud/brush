@@ -130,7 +130,7 @@ pub fn pattern_path_root(first_component: &str) -> Option<std::path::PathBuf> {
 ///
 /// In the stub implementation, this delegates directly to `PathBuf::push`.
 pub fn push_path_for_pattern(path: &mut std::path::PathBuf, component: &str) {
-    path.push(component);
+    path.push(crate::rawbytes::to_os_string(component));
 }
 
 /// Normalizes path separators for shell output.

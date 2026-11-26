@@ -1,7 +1,7 @@
 use clap::Parser;
-use std::{io::Write, path::PathBuf};
+use std::io::Write;
 
-use brush_core::{ExecutionResult, builtins};
+use brush_core::{ExecutionResult, builtins, rawbytes};
 
 #[derive(Parser)]
 pub(crate) struct HashCommand {
@@ -15,7 +15,7 @@ pub(crate) struct HashCommand {
 
     /// The path to associate with the names.
     #[arg(short = 'p', value_name = "PATH")]
-    path_to_use: Option<PathBuf>,
+    path_to_use: Option<String>,
 
     /// Remove all entries.
     #[arg(short = 'r')]
@@ -56,12 +56,10 @@ impl builtins::Command for HashCommand {
         } else if self.display_paths {
             for name in &self.names {
                 if let Some(path) = context.shell.program_location_cache().get(name) {
-                    if self.display_as_usable_input {
-                        writeln!(
-                            context.stdout(),
-                            "builtin hash -p {} {name}",
-                            path.to_string_lossy()
-                        )?;
+                    let path = rawbytes::from_os_str(path.as_os_str());
+                    // A name or path holds the bytes it stands for (see `rawbytes`).
+                    let line = if self.display_as_usable_input {
+                        format!("builtin hash -p {path} {name}\n")
                     } else {
                         let mut prefix = String::new();
 
@@ -70,25 +68,23 @@ impl builtins::Command for HashCommand {
                             prefix.push('\t');
                         }
 
-                        writeln!(
-                            context.stdout(),
-                            "{prefix}{}",
-                            path.to_string_lossy().as_ref()
-                        )?;
-                    }
+                        format!("{prefix}{path}\n")
+                    };
+                    context.stdout().write_all(&rawbytes::encode(&line))?;
                 } else {
                     context.report(format_args!("{name}: not found"))?;
                     result = ExecutionResult::general_error();
                 }
             }
-        } else if let Some(path) = &self.path_to_use {
+        } else if let Some(shown) = &self.path_to_use {
             // The shell's working directory is its own state, not the process's, so a
             // relative path is resolved against it before it's inspected -- but reported as given.
-            let is_dir = context.shell.absolute_path(path).is_dir();
+            let path = rawbytes::to_path(shown);
+            let is_dir = context.shell.absolute_path(&path).is_dir();
 
             for name in &self.names {
                 if is_dir {
-                    context.report(format_args!("{}: Is a directory", path.display()))?;
+                    context.report(format_args!("{shown}: Is a directory"))?;
                     result = ExecutionResult::general_error();
                     continue;
                 }

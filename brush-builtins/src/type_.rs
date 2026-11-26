@@ -80,7 +80,7 @@ impl builtins::Command for TypeCommand {
                         }
                         Resolved::File { path, .. } => {
                             if self.show_path_only || self.force_path_search {
-                                writeln!(context.stdout(), "{}", path.to_string_lossy())?;
+                                write_path_line(context.stdout(), path)?;
                             } else {
                                 writeln!(context.stdout(), "file")?;
                             }
@@ -94,7 +94,7 @@ impl builtins::Command for TypeCommand {
                         Resolved::File { path, .. }
                             if self.show_path_only || self.force_path_search =>
                         {
-                            writeln!(context.stdout(), "{}", path.to_string_lossy())?;
+                            write_path_line(context.stdout(), path)?;
                         }
                         _ => lookup::describe(context.stdout(), name, &resolved_type)?,
                     }
@@ -109,4 +109,10 @@ impl builtins::Command for TypeCommand {
 
         Ok(result)
     }
+}
+
+/// Writes `path` and a newline, as the bytes it holds.
+fn write_path_line(mut writer: impl Write, path: &std::path::Path) -> std::io::Result<()> {
+    writer.write_all(path.as_os_str().as_encoded_bytes())?;
+    writeln!(writer)
 }

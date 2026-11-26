@@ -414,7 +414,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
             // All else failed; if we were given path directories to search, look through them
             // for a match. Otherwise, use our default search logic.
             let path = if let Some(path_dirs) = &self.path_dirs {
-                pathsearch::resolve_command(path_dirs, self.command_name.as_str())
+                pathsearch::resolve_command(path_dirs, rawbytes::to_path(&self.command_name))
             } else {
                 self.shell
                     .resolve_command_in_path_using_cache(&self.command_name)
@@ -466,7 +466,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
                 Err(ErrorKind::CommandNotFound(self.command_name).into())
             }
         } else {
-            let command_name = PathBuf::from(self.command_name.clone());
+            let command_name = rawbytes::to_path(&self.command_name);
             self.execute_via_external(command_name.as_path())
         }
     }
@@ -669,7 +669,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
             params: self.params,
         };
 
-        let resolved_path = path.to_string_lossy();
+        let resolved_path = rawbytes::from_os_str(path.as_os_str());
         let result = execute_external_command(
             cmd_context,
             resolved_path.as_ref(),
@@ -819,7 +819,7 @@ fn unexecutable(shell: &Shell<impl extensions::ShellExtensions>, name: String) -
     if !name.contains('/') {
         return error::ErrorKind::ExecutingFilesUnsupported(name).into();
     }
-    let path = shell.absolute_path(std::path::Path::new(&name));
+    let path = shell.absolute_path(rawbytes::to_path(&name));
     match std::fs::metadata(&path) {
         Err(_) => error::ErrorKind::CannotExecutePath(name, error::NO_SUCH_FILE),
         Ok(metadata) if metadata.is_dir() => {

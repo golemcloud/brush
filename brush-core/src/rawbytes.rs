@@ -148,6 +148,25 @@ pub fn to_os_string(text: &str) -> std::ffi::OsString {
     }
 }
 
+/// Converts a shell string to the path it names, holding the bytes it stands for.
+///
+/// # Arguments
+///
+/// * `text` - The string to convert.
+pub fn to_path(text: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(to_os_string(text))
+}
+
+/// Converts an OS string, such as a file name, to a shell string, keeping each byte that is not
+/// part of valid UTF-8.
+///
+/// # Arguments
+///
+/// * `text` - The OS string to convert.
+pub fn from_os_str(text: &std::ffi::OsStr) -> Cow<'_, str> {
+    decode(text.as_encoded_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

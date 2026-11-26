@@ -98,3 +98,42 @@ cases:
       export Y=$'a\xfeb'
       env | grep -a '^Y=' | od -An -tx1
       (exec env printf '%s' "$x") | od -An -tx1
+
+  - name: "File names with raw bytes in tests, cd, source, lookup and hash"
+    stdin: |
+      # The harness compares the files left behind by name, so none is left.
+      trap 'cd /; rm -rf "$work"' EXIT
+      work=$PWD/work; mkdir "$work"; cd "$work"
+      n=$'\xff\xe9'
+      touch -d 2020-01-01 "f$n"; mkdir "d$n"; echo 'echo sourced' > "s$n"
+      touch -d 2021-01-01 "s$n"
+      printf '#!/bin/sh\necho ran\n' > "x$n"; chmod +x "x$n"
+      [[ -f f$n ]] && echo f
+      [[ -d d$n ]] && echo d
+      [ -e "f$n" ] && echo e
+      test -s "s$n" && echo s
+      [[ s$n -nt f$n ]] && echo nt
+      [[ f$n -ot s$n ]] && echo ot
+      [[ f$n -ef f$n ]] && echo ef
+      (cd "d$n" && pwd | od -An -tx1 | tr -d ' \n' | tail -c 8; echo)
+      . "./s$n"
+      "./x$n"
+      PATH=$PWD:$PATH
+      "x$n"
+      type "x$n" | sed "s|$PWD/||" | od -An -tx1
+      type -P "x$n" | sed "s|$PWD/||" | od -An -tx1
+      hash -p "./x$n" hx; hx
+      hash -t hx | od -An -tx1
+
+  - name: "Globs match and give file names with raw bytes"
+    stdin: |
+      # The harness compares the files left behind by name, so none is left.
+      trap 'cd /; rm -rf "$work"' EXIT
+      work=$PWD/work; mkdir "$work"; cd "$work"
+      n=$'\xff\xe9'
+      touch "f$n" "g$n"
+      for f in f*; do echo -n "$f" | od -An -tx1; done
+      echo *"$n" | od -An -tx1
+      echo [fg]"$n" | od -An -tx1
+      compgen -f f | od -An -tx1
+      [[ f$n == f* ]] && echo match
