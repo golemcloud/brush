@@ -382,7 +382,7 @@ async fn run_in_shell(
             .lock()
             .await
             .run_script(
-                Path::new(&args.script_args[0]),
+                &brush_core::rawbytes::to_path(&args.script_args[0]),
                 args.script_args.iter().skip(1),
             )
             .await?;

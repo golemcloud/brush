@@ -151,3 +151,7 @@ cases:
       "$BASH" -c $'echo "\xfe" | od -An -tx1'
       "$BASH" -c 'echo "$0" | od -An -tx1' $'z\xfd'
       printf 'echo "\xf4\x8f\xbe\x80"\necho "a\xffb"\n' | "$BASH" | od -An -tx1
+      # The harness compares the files left behind by name, so this one is removed.
+      printf 'echo "$0" | od -An -tx1\n' > s$'\xfe'.sh
+      "$BASH" s$'\xfe'.sh
+      rm s$'\xfe'.sh

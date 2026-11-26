@@ -25,7 +25,8 @@ impl From<&str> for SourceInfo {
 impl From<PathBuf> for SourceInfo {
     fn from(path: PathBuf) -> Self {
         Self {
-            source: path.to_string_lossy().to_string(),
+            // A script's name (`$0`, `BASH_SOURCE`) holds the bytes of its path.
+            source: crate::rawbytes::from_os_str(path.as_os_str()).into_owned(),
             start: None,
         }
     }
