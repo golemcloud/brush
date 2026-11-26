@@ -733,3 +733,14 @@ cases:
       declare declared=$value
       printf '%s\n' "$value"
       trap - DEBUG
+
+  - name: "Trap action keeps PIPESTATUS"
+    stdin: |
+      trap 'true | true | true' ERR
+      false | false
+      echo "${PIPESTATUS[*]}"
+      f() { true | true | true; }
+      trap 'f' RETURN
+      g() { (exit 3) | (exit 4); }
+      g
+      echo "${PIPESTATUS[*]}"
