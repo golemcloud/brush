@@ -146,7 +146,6 @@ peg::parser! {
     }
 }
 
-/// The value of a literal's digits (all valid in the radix), wrapped to 64 bits.
 /// The length of the subscript text that starts `text`: up to its first `]` outside nested
 /// brackets, or `None` when no `]` closes it.
 fn subscript_len(text: &str) -> Option<usize> {
@@ -162,6 +161,7 @@ fn subscript_len(text: &str) -> Option<usize> {
     None
 }
 
+/// The value of a literal's digits (all valid in the radix), wrapped to 64 bits.
 fn wrapping_literal(digits: &str, radix: u32) -> i64 {
     digits
         .chars()
