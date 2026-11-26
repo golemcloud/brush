@@ -215,6 +215,12 @@ impl<T> LocalTaskHandle<T> {
     pub fn abort(&self) {
         self.control.abort();
     }
+    /// Drops the handle and leaves the task running, until it ends or the scope it runs in is
+    /// cancelled.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn detach(mut self) {
+        self.adopted = true;
+    }
 }
 
 impl<T> Drop for LocalTaskHandle<T> {
