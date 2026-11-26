@@ -166,49 +166,57 @@ impl From<PatternWord> for Pattern {
 }
 
 /// `pieces` in the form the values they are matched against take (see [`rawbytes::normalize`]):
-/// bytes that together make a character become it, also where pieces meet (`$a$b`). Such a
-/// character has no pattern meaning, so it may move from one piece to the one before.
+/// each run of bytes that are not UTF-8 on their own, across pieces and past empty ones
+/// (`$a''$b`), is read as one, as the value's text is, so bytes that together make a character
+/// become it. The character goes to the piece its first byte came from; it has no pattern
+/// meaning, and each other character keeps its piece.
 fn normalized(mut pieces: PatternWord) -> PatternWord {
-    const fn text(piece: &mut PatternPiece) -> &mut String {
-        match piece {
-            PatternPiece::Pattern(s) | PatternPiece::Literal(s) => s,
+    /// Normalizes `run`, the bytes whose pieces `run_pieces` gives, into those pieces.
+    fn flush(run: &mut String, run_pieces: &mut Vec<usize>, rebuilt: &mut [String]) {
+        let mut byte = 0;
+        for c in rawbytes::normalize(std::mem::take(run)).chars() {
+            if let Some(text) = run_pieces
+                .get(byte)
+                .and_then(|&piece| rebuilt.get_mut(piece))
+            {
+                text.push(c);
+            }
+            byte += if rawbytes::char_byte(c).is_some() {
+                1
+            } else {
+                c.len_utf8()
+            };
         }
+        run_pieces.clear();
     }
 
-    for piece in &mut pieces {
-        let s = text(piece);
-        *s = rawbytes::normalize(std::mem::take(s));
+    let is_byte = |c: char| rawbytes::char_byte(c).is_some();
+    if !pieces
+        .iter()
+        .any(|piece| piece.as_str().chars().any(is_byte))
+    {
+        return pieces;
     }
-    for i in 1..pieces.len() {
-        let (before, after) = pieces.split_at_mut(i);
-        let (previous, current) = (text(&mut before[i - 1]), text(&mut after[0]));
-        // A character is at most four bytes, so at most three bytes from each side make one.
-        let is_byte = |c: &char| rawbytes::char_byte(*c).is_some();
-        let tail = previous
-            .char_indices()
-            .rev()
-            .take(3)
-            .take_while(|(_, c)| is_byte(c))
-            .last()
-            .map(|(index, _)| index);
-        let lead = current
-            .char_indices()
-            .take(3)
-            .take_while(|(_, c)| is_byte(c))
-            .last()
-            .map(|(index, c)| index + c.len_utf8());
-        let (Some(tail), Some(lead)) = (tail, lead) else {
-            continue;
-        };
-        let (Some(ending), Some(starting)) = (previous.get(tail..), current.get(..lead)) else {
-            continue;
-        };
-        let joined = std::format!("{ending}{starting}");
-        let normal = rawbytes::normalize(joined.clone());
-        if normal != joined {
-            previous.truncate(tail);
-            previous.push_str(&normal);
-            current.replace_range(..lead, "");
+    let mut rebuilt = vec![String::new(); pieces.len()];
+    let mut run = String::new();
+    let mut run_pieces = vec![];
+    for (index, piece) in pieces.iter().enumerate() {
+        for c in piece.as_str().chars() {
+            if is_byte(c) {
+                run.push(c);
+                run_pieces.push(index);
+            } else {
+                flush(&mut run, &mut run_pieces, &mut rebuilt);
+                if let Some(text) = rebuilt.get_mut(index) {
+                    text.push(c);
+                }
+            }
+        }
+    }
+    flush(&mut run, &mut run_pieces, &mut rebuilt);
+    for (piece, text) in pieces.iter_mut().zip(rebuilt) {
+        match piece {
+            PatternPiece::Pattern(s) | PatternPiece::Literal(s) => *s = text,
         }
     }
     pieces

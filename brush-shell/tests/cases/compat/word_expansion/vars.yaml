@@ -103,3 +103,23 @@ cases:
       case é in $a$b) echo c1;; *) echo nc1;; esac
       case é in "$a$b") echo c2;; *) echo nc2;; esac
       w=xé; echo "${w#x$a$b}|${w%$a$b}|${w/$a$b/E}"
+
+  - name: "Bytes over several pattern pieces match as the character they make"
+    env:
+      LC_ALL: "C.UTF-8"
+    stdin: |
+      a=$'\xe2' b=$'\x82' c=$'\xac'
+      [[ $a$b$c == $a$b$c ]] && echo e1 || echo n1
+      [[ € == $a$b$c ]] && echo e2 || echo n2
+      case € in $a$b$c) echo c3;; *) echo nc3;; esac
+      [[ x€y == x$a"$b"$c* ]] && echo e4 || echo n4
+      w=x€y; echo "${w#x$a$b$c}|${w/$a$b$c/E}"
+      d=$'\xf0' e=$'\x9f' f=$'\x98' g=$'\x80'
+      [[ 😀 == $d$e$f$g ]] && echo e5 || echo n5
+      [[ $d$e$f$g == "$d"$e"$f"$g ]] && echo e6 || echo n6
+      case 😀 in $d''$e""$f$g) echo c7;; *) echo nc7;; esac
+      a=$'\xc3' b=$'\xa9'
+      [[ $a''$b == $a''$b ]] && echo e8 || echo n8
+      [[ é == $a""$b ]] && echo e9 || echo n9
+      [[ $a == $a* ]] && echo e10 || echo n10
+      [[ "$a"x == $a? ]] && echo e11 || echo n11
