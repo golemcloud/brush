@@ -917,14 +917,15 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     // `[` is not an operator, so a subscript's opening bracket is inside a word
                     // (`$[a[0] < 9]`); each one left open needs its own closing bracket. A word
                     // can also hold both (`+(a[1])`, read whole as a pattern).
-                    Token::Word(w, _) if nesting_open == "[" || nesting_open == "{" => {
-                        let (open, close) = if nesting_open == "[" {
-                            ('[', ']')
-                        } else {
-                            ('{', '}')
-                        };
-                        let open = w.matches(open).count();
-                        let closed = w.matches(close).count();
+                    Token::Word(w, _) if nesting_open == "[" => {
+                        let open = w.matches('[').count();
+                        let closed = w.matches(']').count();
+                        nesting_count +=
+                            u32::try_from(open.saturating_sub(closed)).unwrap_or(u32::MAX);
+                    }
+                    // In `${ command; }`, a quoted or escaped brace is text.
+                    Token::Word(w, _) if nesting_open == "{" => {
+                        let (open, closed) = unquoted_braces(w);
                         nesting_count +=
                             u32::try_from(open.saturating_sub(closed)).unwrap_or(u32::MAX);
                     }
@@ -1862,6 +1863,49 @@ impl CaseTracker {
     }
 }
 
+/// The `{` and `}` in `word` that are neither quoted nor escaped.
+fn unquoted_braces(word: &str) -> (usize, usize) {
+    let (mut open, mut closed) = (0, 0);
+    let mut chars = word.chars();
+    let mut previous = None;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '\'' => {
+                // `$'...'` lets a backslash escape its closing quote.
+                let ansi_c = previous == Some('$');
+                while let Some(quoted) = chars.next() {
+                    match quoted {
+                        '\\' if ansi_c => {
+                            chars.next();
+                        }
+                        '\'' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '"' => {
+                while let Some(quoted) = chars.next() {
+                    match quoted {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '{' => open += 1,
+            '}' => closed += 1,
+            _ => {}
+        }
+        previous = Some(c);
+    }
+    (open, closed)
+}
+
 /// Whether `s` is a valid variable name.
 /// The line of the last character read, given the position after it: the line before when that
 /// character was a newline.
@@ -2673,6 +2717,30 @@ HERE2
         assert_eq!(unquote_str(r#""a\$b""#), "a$b");
         // Outside quotes, backslash escapes the next character.
         assert_eq!(unquote_str(r"hel\'lo"), "hel'lo");
+    }
+
+    #[test]
+    fn quoted_braces_do_not_nest_in_a_command_in_braces() {
+        for funsub in [
+            "${ echo '{'; }",
+            "${ echo \"a{b\"; }",
+            "${ echo a\\{; }",
+            "${ echo $'\\'{'; }",
+            "${ echo '}'; }",
+            "${ { echo g; }; }",
+        ] {
+            let tokens = uncached_tokenize_str(
+                &format!("x={funsub}; echo after"),
+                &TokenizerOptions::default(),
+            )
+            .unwrap_or_default();
+            let words: Vec<&str> = tokens.iter().map(Token::to_str).collect();
+            assert_eq!(
+                words,
+                [format!("x={funsub}").as_str(), ";", "echo", "after"],
+                "{funsub}"
+            );
+        }
     }
 
     #[test]
