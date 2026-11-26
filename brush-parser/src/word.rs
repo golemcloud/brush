@@ -688,6 +688,29 @@ fn nesting(text: &str, quotes: bool) -> usize {
     deepest
 }
 
+/// Whether a command starts after `before`, the text of a substitution's command read so far:
+/// at its start, after a control operator, a subshell's `(` or a case pattern's `)`, or after a
+/// reserved word that a command follows. After `;;`, `;&` or `;;&` a case pattern comes instead.
+fn starts_command(before: &str) -> bool {
+    let before = before.trim_end_matches([' ', '\t']);
+    match before.chars().next_back() {
+        None | Some('\n' | '|' | '(' | ')') => true,
+        Some(';') => !before.ends_with(";;"),
+        Some('&') => !before.ends_with(";&"),
+        Some(_) => {
+            let word = before
+                .rsplit([' ', '\t', '\n', ';', '&', '|', '(', ')'])
+                .next()
+                .unwrap_or_default();
+            word.ends_with("${")
+                || matches!(
+                    word,
+                    "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "{" | "!" | "time"
+                )
+        }
+    }
+}
+
 const fn closing_bracket(open: u8) -> u8 {
     match open {
         b'(' => b')',
@@ -1652,7 +1675,7 @@ peg::parser! {
         // own and a `case` command is seen where it starts.
         pub(crate) rule command_piece() -> () =
             here_documents() {} /
-            case_command() {} /
+            command_start() case_command() {} /
             word_piece(<command_piece_stop()>, true /*in_command*/) {} /
             ([' ' | '\t' | '\n' | ';' | '&' | '|'])+ {} /
             ['\'' | '`'] {}
@@ -1660,19 +1683,30 @@ peg::parser! {
         rule command_piece_stop() -> () = [')' | ' ' | '\t' | '\n' | ';' | '&' | '|'] {}
 
         // A case command, whose patterns end in `)`, taken whole through its `esac` (bash reads
-        // a substitution as a command).
+        // a substitution as a command). Each start is tried once, so a run of `case` words that
+        // starts no command takes linear time.
+        #[cache]
         rule case_command() =
             "case" &keyword_end() (!("esac" keyword_end()) case_command_piece())* "esac" &keyword_end()
 
         rule case_command_piece() =
             here_documents() {} /
-            case_command() /
+            command_start() case_command() /
             word_piece(<case_command_stop()>, true /*in_command*/) {} /
             [_] {}
 
         rule case_command_stop() -> () = [')' | '(' | ' ' | '\t' | '\n' | ';' | '&' | '|'] {}
 
         rule keyword_end() = [' ' | '\t' | '\n' | ';' | ')' | '&' | '|'] / ![_]
+
+        // Where a command starts, so a reserved word there is one (see [`starts_command`]).
+        rule command_start() = #{|input, pos| {
+            if input.get(..pos).is_some_and(starts_command) {
+                peg::RuleResult::Matched(pos, ())
+            } else {
+                peg::RuleResult::Failed
+            }
+        }}
 
         // A here-document operator in a command's text, taken with the rest of its line and the
         // body of each here-document on that line, whose parentheses and quotes are text.
@@ -1687,7 +1721,7 @@ peg::parser! {
         // group or brace expression of its own.
         rule funsub_piece() =
             here_documents() {} /
-            case_command() /
+            command_start() case_command() /
             "{" (!"}" funsub_piece())* "}" {} /
             word_piece(<funsub_stop()>, true /*in_command*/) {} /
             [' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')'] {}
