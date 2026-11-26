@@ -668,6 +668,15 @@ cases:
       2) + $((1 +\
       1)) )); echo "z=$z"
 
+  - name: "Regex with a line continuation after a quote in a comment in a substitution"
+    stdin: |
+      [[ ab =~ "$(: x # it's
+      printf %s 'a\
+      b')" ]] && echo m1 || echo n1
+      [[ ab =~ "$(:;# it's
+      printf %s 'a\
+      b')" ]] && echo m2 || echo n2
+
   - name: "Regex with a line continuation after quotes in an arithmetic expansion"
     stdin: |
       [[ ab =~ "${y:+$(( "1'" ))}"a\
