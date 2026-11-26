@@ -1571,7 +1571,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     })?;
                 self.restore_pending_here_docs(pending);
 
-                self.cross_state.arithmetic_expansion = !is_arithmetic && in_arithmetic;
+                self.cross_state.arithmetic_expansion = in_arithmetic;
                 let body = if is_arithmetic {
                     ExpansionBody::Arithmetic
                 } else {
@@ -1589,7 +1589,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                 // Keep track that we're in an arithmetic expression, since
                 // some text will be interpreted differently as a result.
-                self.cross_state.arithmetic_expansion = true;
+                let in_arithmetic =
+                    std::mem::replace(&mut self.cross_state.arithmetic_expansion, true);
 
                 let start = self.cross_state.cursor.clone();
                 let body_start = start.index;
@@ -1603,7 +1604,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     })?;
                 self.restore_pending_here_docs(pending);
 
-                self.cross_state.arithmetic_expansion = false;
+                self.cross_state.arithmetic_expansion = in_arithmetic;
                 Ok(Some((ExpansionBody::Arithmetic, body_start)))
             }
 

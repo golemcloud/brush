@@ -377,3 +377,12 @@ cases:
       for (( i = $(echo 0 # it's
       ); i < 2; i++ )); do echo "i=$i"; done
       (( z = $(case a in a) echo 1;; esac) + 1 )); echo "z=$z"
+
+  - name: "Shift after a nested arithmetic expansion in an arithmetic expression"
+    stdin: |
+      a=1; (( x = $((a)) << 2 )); echo "x=$x"
+      (( y = $[a] << 2 )); echo "y=$y"
+      z=$(( $((a)) << 3 )); echo "z=$z"
+      for (( i = $((a)) << 1; i < 3; i++ )); do echo "i=$i"; done
+      w=$(( $[a] << 1 )); echo "w=$w"
+      echo after
