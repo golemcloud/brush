@@ -939,6 +939,30 @@ fn push_without_line_continuations(
             comment_may_start = false;
             continue;
         }
+        // As the tokenizer reads it, `<(` or `>(` inside a word in a command starts a process
+        // substitution, read through its `)` as part of the word, like a command substitution.
+        if matches!(c, '<' | '>')
+            && quote.is_none()
+            && commands
+            && !comment_may_start
+            && !options.sh_mode
+            && let Some(inner) = rest.get(1..).and_then(|after| after.strip_prefix('('))
+            && let Ok(len) = crate::tokenizer::command_substitution_len(inner, options)
+            && let Some(list) = inner.get(..len.saturating_sub(1))
+        {
+            result.push(c);
+            result.push('(');
+            push_without_line_continuations(
+                list,
+                Some(ExpansionBody::Commands),
+                false,
+                options,
+                result,
+            );
+            result.push(')');
+            rest = inner.get(len..).unwrap_or_default();
+            continue;
+        }
         rest = rest.get(c.len_utf8()..).unwrap_or_default();
         match (quote, c) {
             (Some(Quote::Single | Quote::AnsiC), '\'')

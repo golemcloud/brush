@@ -711,3 +711,12 @@ cases:
       [[ $'1#b\nc de' =~ "$(echo $((1))#'b
       c' 'd\
       e')" ]] && echo m4 || echo n4
+      [[ de =~ "$(: x<(true)#'b
+      c'; printf %s 'd\
+      e')" ]] && echo m5 || echo n5
+      [[ de =~ "$(: x>(cat)#'b
+      c'; printf %s 'd\
+      e')" ]] && echo m6 || echo n6
+      [[ de =~ "$(: x<(echo "#'")#'b
+      c'; printf %s 'd\
+      e')" ]] && echo m7 || echo n7
