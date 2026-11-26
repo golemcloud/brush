@@ -159,10 +159,56 @@ impl Default for Pattern {
 impl From<PatternWord> for Pattern {
     fn from(pieces: PatternWord) -> Self {
         Self {
-            pieces,
+            pieces: normalized(pieces),
             ..Default::default()
         }
     }
+}
+
+/// `pieces` in the form the values they are matched against take (see [`rawbytes::normalize`]):
+/// bytes that together make a character become it, also where pieces meet (`$a$b`). Such a
+/// character has no pattern meaning, so it may move from one piece to the one before.
+fn normalized(mut pieces: PatternWord) -> PatternWord {
+    fn text(piece: &mut PatternPiece) -> &mut String {
+        match piece {
+            PatternPiece::Pattern(s) | PatternPiece::Literal(s) => s,
+        }
+    }
+
+    for piece in &mut pieces {
+        let s = text(piece);
+        *s = rawbytes::normalize(std::mem::take(s));
+    }
+    for i in 1..pieces.len() {
+        let (before, after) = pieces.split_at_mut(i);
+        let (previous, current) = (text(&mut before[i - 1]), text(&mut after[0]));
+        // A character is at most four bytes, so at most three bytes from each side make one.
+        let is_byte = |c: &char| rawbytes::char_byte(*c).is_some();
+        let tail = previous
+            .char_indices()
+            .rev()
+            .take(3)
+            .take_while(|(_, c)| is_byte(c))
+            .last()
+            .map(|(index, _)| index);
+        let lead = current
+            .char_indices()
+            .take(3)
+            .take_while(|(_, c)| is_byte(c))
+            .last()
+            .map(|(index, c)| index + c.len_utf8());
+        let (Some(tail), Some(lead)) = (tail, lead) else {
+            continue;
+        };
+        let joined = std::format!("{}{}", &previous[tail..], &current[..lead]);
+        let normal = rawbytes::normalize(joined.clone());
+        if normal != joined {
+            previous.truncate(tail);
+            previous.push_str(&normal);
+            current.replace_range(..lead, "");
+        }
+    }
+    pieces
 }
 
 impl From<&PatternWord> for Pattern {

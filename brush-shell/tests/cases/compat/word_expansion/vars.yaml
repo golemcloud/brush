@@ -90,3 +90,16 @@ cases:
       arr=($a); arr[0]+=$b; echo ${#arr[0]}
       declare -A m2; m2[k]=$a; m2[k]+=$b; echo ${#m2[k]}
       s=("$a" "$b"); IFS=; j="${s[*]}"; echo ${#j}
+
+  - name: "Bytes joined into a character match as that character in patterns"
+    env:
+      LC_ALL: "C.UTF-8"
+    stdin: |
+      a=$'\xc3'; b=$'\xa9'
+      [[ $a$b == $a$b ]] && echo eq1 || echo ne1
+      [[ é == $a$b ]] && echo eq2 || echo ne2
+      [[ é == "$a$b" ]] && echo eq3 || echo ne3
+      [[ xé == x$a$b ]] && echo eq4 || echo ne4
+      case é in $a$b) echo c1;; *) echo nc1;; esac
+      case é in "$a$b") echo c2;; *) echo nc2;; esac
+      w=xé; echo "${w#x$a$b}|${w%$a$b}|${w/$a$b/E}"
