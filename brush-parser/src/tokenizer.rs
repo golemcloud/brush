@@ -234,33 +234,34 @@ pub(crate) struct Tokens<'a> {
     /// The text the tokens were read from, when known.
     pub source: Option<&'a str>,
     /// The byte offset in `source` of each character the tokens' locations count, then the
-    /// length of `source`; empty when `source` is unknown or ASCII, where the two agree.
-    char_starts: Vec<usize>,
+    /// length of `source`, built when first needed; `None` when `source` is unknown or ASCII,
+    /// where the two agree.
+    char_starts: std::cell::OnceCell<Option<Vec<usize>>>,
 }
 
 impl<'a> Tokens<'a> {
-    pub fn new(tokens: &'a [Token], source: Option<&'a str>) -> Self {
-        let char_starts = match source {
-            Some(text) if !text.is_ascii() => text
-                .char_indices()
-                .map(|(offset, _)| offset)
-                .chain(std::iter::once(text.len()))
-                .collect(),
-            _ => vec![],
-        };
+    pub const fn new(tokens: &'a [Token], source: Option<&'a str>) -> Self {
         Self {
             tokens,
             source,
-            char_starts,
+            char_starts: std::cell::OnceCell::new(),
         }
     }
 
     /// The byte offset in the source of the character at `index`.
     pub fn byte_offset(&self, index: usize) -> Option<usize> {
-        if self.char_starts.is_empty() {
-            Some(index)
-        } else {
-            self.char_starts.get(index).copied()
+        let char_starts = self.char_starts.get_or_init(|| match self.source {
+            Some(text) if !text.is_ascii() => Some(
+                text.char_indices()
+                    .map(|(offset, _)| offset)
+                    .chain(std::iter::once(text.len()))
+                    .collect(),
+            ),
+            _ => None,
+        });
+        match char_starts {
+            None => Some(index),
+            Some(char_starts) => char_starts.get(index).copied(),
         }
     }
 }
