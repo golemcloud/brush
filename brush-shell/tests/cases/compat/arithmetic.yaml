@@ -367,3 +367,13 @@ cases:
       y="a[$(printf '[%.0s' {1..20000})"
       echo $((y))
       echo "after $?"
+
+  - name: "Command substitution with a comment or a case in an arithmetic expression"
+    stdin: |
+      (( x = $(echo 1 # it's
+      ) + 1 )); echo "x=$x"
+      y=$(( $(echo 2 # it's
+      ) * 2 )); echo "y=$y"
+      for (( i = $(echo 0 # it's
+      ); i < 2; i++ )); do echo "i=$i"; done
+      (( z = $(case a in a) echo 1;; esac) + 1 )); echo "z=$z"

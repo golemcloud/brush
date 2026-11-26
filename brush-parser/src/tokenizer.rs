@@ -1284,9 +1284,12 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     (1, false)
                                 };
 
-                            if is_arithmetic {
-                                self.cross_state.arithmetic_expansion = true;
-                            }
+                            // A command substitution holds commands, with their comments and
+                            // case patterns, even inside an arithmetic expression.
+                            let in_arithmetic = std::mem::replace(
+                                &mut self.cross_state.arithmetic_expansion,
+                                is_arithmetic,
+                            );
 
                             // Bash names the line an arithmetic expansion left open began on.
                             let start = self.cross_state.cursor.clone();
@@ -1302,9 +1305,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 })?;
                             self.restore_pending_here_docs(pending);
 
-                            if is_arithmetic {
-                                self.cross_state.arithmetic_expansion = false;
-                            }
+                            self.cross_state.arithmetic_expansion = !is_arithmetic && in_arithmetic;
                         }
 
                         Some('[') => {
@@ -1342,9 +1343,14 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // `${ command; }` and `${| command; }` (bash 5.3) hold a command,
                             // read like the one in `$(...)`.
                             if matches!(self.peek_char()?, Some(' ' | '\t' | '\n' | '|')) {
+                                let in_arithmetic = std::mem::replace(
+                                    &mut self.cross_state.arithmetic_expansion,
+                                    false,
+                                );
                                 let pending = self.set_aside_pending_here_docs()?;
                                 self.consume_nested_construct(&mut state, '}', "{", 1)?;
                                 self.restore_pending_here_docs(pending);
+                                self.cross_state.arithmetic_expansion = in_arithmetic;
                                 continue;
                             }
 
