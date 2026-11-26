@@ -874,37 +874,40 @@ fn negated(bangs: usize, expr: ast::ExtendedTestExpr) -> ast::ExtendedTestExpr {
 }
 
 /// `text` without its line continuations: a backslash-newline that no other backslash escapes,
-/// outside single quotes and ANSI-C quotes. As in bash, a command substitution `$(...)` quotes
-/// on its own, even inside double quotes; it ends where the tokenizer finds its `)` (past the
-/// `)` of a case pattern, or a quote in a comment), and its text loses its own continuations.
+/// outside single quotes and ANSI-C quotes. As in bash, a command substitution `$(...)` and an
+/// arithmetic expansion `$((...))` quote on their own, even inside double quotes. A command
+/// substitution ends where the tokenizer finds its `)` (past the `)` of a case pattern, or a
+/// quote in a comment), and its text loses its own continuations.
 /// Backquotes take quotes as text.
 fn without_line_continuations(text: &str, options: &crate::TokenizerOptions) -> String {
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Quote {
+    enum Context {
         Double,
         Single,
         AnsiC,
         Backquote,
+        /// In `$((...))`, with the parentheses open in it, as the tokenizer counts them.
+        Arithmetic(usize),
     }
 
     if !text.contains("\\\n") {
         return text.to_owned();
     }
     let mut result = String::with_capacity(text.len());
-    let mut quotes = vec![];
+    let mut contexts = vec![];
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
         rest = rest.get(c.len_utf8()..).unwrap_or_default();
-        let quote = quotes.last().copied();
-        match (quote, c) {
-            (Some(Quote::Single | Quote::AnsiC), '\'')
-            | (Some(Quote::Double), '"')
-            | (Some(Quote::Backquote), '`') => {
-                quotes.pop();
+        let context = contexts.last().copied();
+        match (context, c) {
+            (Some(Context::Single | Context::AnsiC), '\'')
+            | (Some(Context::Double), '"')
+            | (Some(Context::Backquote), '`') => {
+                contexts.pop();
             }
-            (Some(Quote::Single), _) => {}
+            (Some(Context::Single), _) => {}
             (_, '\\') => {
-                if quote != Some(Quote::AnsiC)
+                if context != Some(Context::AnsiC)
                     && let Some(after) = rest.strip_prefix('\n')
                 {
                     rest = after;
@@ -917,10 +920,20 @@ fn without_line_continuations(text: &str, options: &crate::TokenizerOptions) -> 
                 }
                 continue;
             }
-            (Some(Quote::AnsiC | Quote::Backquote), _) => {}
-            (None | Some(Quote::Double), '`') => quotes.push(Quote::Backquote),
-            (None | Some(Quote::Double), '$')
-                if rest.starts_with('(') && !rest.starts_with("((") =>
+            (Some(Context::AnsiC | Context::Backquote), _) => {}
+            (None | Some(Context::Double | Context::Arithmetic(_)), '`') => {
+                contexts.push(Context::Backquote);
+            }
+            (None | Some(Context::Double | Context::Arithmetic(_)), '$')
+                if rest.starts_with("((") =>
+            {
+                result.push_str("$((");
+                rest = rest.get(2..).unwrap_or_default();
+                contexts.push(Context::Arithmetic(2));
+                continue;
+            }
+            (None | Some(Context::Double | Context::Arithmetic(_)), '$')
+                if rest.starts_with('(') =>
             {
                 let inner = rest.get(1..).unwrap_or_default();
                 if let Ok(len) = crate::tokenizer::command_substitution_len(inner, options)
@@ -933,14 +946,21 @@ fn without_line_continuations(text: &str, options: &crate::TokenizerOptions) -> 
                     continue;
                 }
             }
-            (None, '$') if rest.starts_with('\'') => {
+            (None | Some(Context::Arithmetic(_)), '$') if rest.starts_with('\'') => {
                 result.push_str("$'");
                 rest = rest.get(1..).unwrap_or_default();
-                quotes.push(Quote::AnsiC);
+                contexts.push(Context::AnsiC);
                 continue;
             }
-            (None, '\'') => quotes.push(Quote::Single),
-            (None, '"') => quotes.push(Quote::Double),
+            (None | Some(Context::Arithmetic(_)), '\'') => contexts.push(Context::Single),
+            (None | Some(Context::Arithmetic(_)), '"') => contexts.push(Context::Double),
+            (Some(Context::Arithmetic(open)), '(' | ')') => {
+                contexts.pop();
+                let open = if c == '(' { open + 1 } else { open - 1 };
+                if open > 0 {
+                    contexts.push(Context::Arithmetic(open));
+                }
+            }
             _ => {}
         }
         result.push(c);
