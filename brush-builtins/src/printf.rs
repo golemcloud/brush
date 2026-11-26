@@ -44,10 +44,8 @@ impl builtins::Command for PrintfCommand {
             let mut result: Vec<u8> = vec![];
             format(self.format_and_args.as_slice(), &mut result)?;
 
-            // Convert to a string.
-            let result_str = String::from_utf8(result).map_err(|_| {
-                brush_core::ErrorKind::PrintfInvalidUsage("invalid UTF-8 output".into())
-            })?;
+            // Convert to a string, keeping bytes that are not UTF-8 (see `rawbytes`).
+            let result_str = brush_core::rawbytes::decode_vec(result);
 
             // Assign to the selected variable.
             expansion::assign_to_named_parameter(
@@ -69,7 +67,13 @@ impl builtins::Command for PrintfCommand {
 fn format(format_and_args: &[String], writer: impl Write) -> Result<(), brush_core::Error> {
     match format_and_args {
         // Handle format string with arguments using uucore
-        [fmt, args @ ..] => format_via_uucore(fmt, args.iter(), writer),
+        // The format and the arguments hold the bytes they stand for (see `rawbytes`).
+        [fmt, args @ ..] => format_via_uucore(
+            fmt,
+            args.iter()
+                .map(|arg| brush_core::rawbytes::to_os_string(arg)),
+            writer,
+        ),
         // Handle case with no format string (we shouldn't be able to get here since clap will
         // fail parsing when the format string is missing)
         [] => Err(ErrorKind::PrintfInvalidUsage("missing operand".into()).into()),
@@ -108,7 +112,8 @@ fn format_via_uucore(
             if let (format::FormatItem::Spec(format::Spec::QuotedString { position }), true) =
                 (item, *backslash_quote)
             {
-                let arg = format_args_wrapper.next_string(*position).to_string_lossy();
+                let arg =
+                    brush_core::rawbytes::from_os_str(format_args_wrapper.next_string(*position));
                 let quoted = quote_printf_q(&arg);
                 write!(writer, "{quoted}")?;
                 continue;
@@ -165,7 +170,8 @@ fn quote_printf_q(s: &str) -> String {
 type ParsedFormatItem = (format::FormatItem<format::EscapedChar>, bool);
 
 fn parse_format_string(format_string: &str) -> Result<Vec<ParsedFormatItem>, brush_core::Error> {
-    let format_items: Result<Vec<_>, _> = format::parse_spec_and_escape(format_string.as_bytes())
+    let format_bytes = brush_core::rawbytes::encode(format_string);
+    let format_items: Result<Vec<_>, _> = format::parse_spec_and_escape(&format_bytes)
         .map(|result| match result {
             Ok(item @ format::FormatItem::Spec(format::Spec::QuotedString { .. })) => {
                 Ok((item, true))
