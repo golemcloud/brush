@@ -111,8 +111,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         &'a self,
         filename: &'a str,
     ) -> impl Iterator<Item = PathBuf> + 'a {
-        let path_var = self.env.get_str("PATH", self).unwrap_or_default();
-        let paths = crate::sys::fs::split_paths(path_var.as_ref());
+        // The directories hold the bytes the value stands for (see `rawbytes`).
+        let path_var = rawbytes::to_os_string(&self.env.get_str("PATH", self).unwrap_or_default());
+        let paths = crate::sys::fs::split_paths(&path_var);
 
         pathsearch::search_for_executable(paths, rawbytes::to_path(filename))
     }
@@ -128,8 +129,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         filename_prefix: &str,
         case_insensitive: bool,
     ) -> impl Iterator<Item = PathBuf> {
-        let path_var = self.env.get_str("PATH", self).unwrap_or_default();
-        let paths = crate::sys::fs::split_paths(path_var.as_ref());
+        // The directories hold the bytes the value stands for (see `rawbytes`).
+        let path_var = rawbytes::to_os_string(&self.env.get_str("PATH", self).unwrap_or_default());
+        let paths = crate::sys::fs::split_paths(&path_var);
 
         pathsearch::search_for_executable_with_prefix(paths, filename_prefix, case_insensitive)
     }
@@ -183,8 +185,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     ///
     /// * `candidate_name` - The name of the command to resolve.
     pub fn resolve_command_in_path<S: AsRef<str>>(&self, candidate_name: S) -> Option<PathBuf> {
-        let path_var = self.env.get_str("PATH", self).unwrap_or_default();
-        let paths = crate::sys::fs::split_paths(path_var.as_ref());
+        // The directories hold the bytes the value stands for (see `rawbytes`).
+        let path_var = rawbytes::to_os_string(&self.env.get_str("PATH", self).unwrap_or_default());
+        let paths = crate::sys::fs::split_paths(&path_var);
         pathsearch::resolve_command(paths, rawbytes::to_path(candidate_name.as_ref()))
     }
 

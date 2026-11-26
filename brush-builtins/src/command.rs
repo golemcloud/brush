@@ -76,7 +76,10 @@ impl CommandCommand {
                         writeln!(context.stdout(), "{name}")?;
                     }
                     Resolved::File { path, .. } => {
-                        writeln!(context.stdout(), "{}", path.to_string_lossy())?;
+                        // The path's own bytes, which need not be UTF-8.
+                        let mut line = path.as_os_str().as_encoded_bytes().to_vec();
+                        line.push(b'\n');
+                        context.stdout().write_all(&line)?;
                     }
                 }
             } else {

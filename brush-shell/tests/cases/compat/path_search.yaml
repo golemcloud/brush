@@ -79,3 +79,17 @@ cases:
       PATH=":$PATH"
 
       command -V prog | scrub; echo "rc=${PIPESTATUS[0]}"
+
+  - name: "PATH directories with raw bytes"
+    stdin: |
+      # The harness compares the files left behind by name, so none is left.
+      trap 'cd /; rm -rf "$work"' EXIT
+      work=$PWD/work; d=$work/b$'\xff'; mkdir -p "$d"; cd "$work"
+      printf '#!/bin/sh\necho ran\n' > "$d/tool"; chmod +x "$d/tool"
+      echo 'echo sourced' > "$d/lib.sh"
+      PATH=$d:$PATH
+      tool
+      type -P tool | sed "s|^$work/||" | od -An -tx1
+      command -v tool | sed "s|^$work/||" | od -An -tx1
+      . lib.sh
+      compgen -c too

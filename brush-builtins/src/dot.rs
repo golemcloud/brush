@@ -37,7 +37,8 @@ impl DotCommand {
             .get_str("PATH", shell)
             .unwrap_or_default()
             .into_owned();
-        for dir in brush_core::sys::fs::split_paths(&path_var) {
+        for dir in brush_core::sys::fs::split_paths(&brush_core::rawbytes::to_os_string(&path_var))
+        {
             let candidate = dir.join(script_path);
             if shell.absolute_path(&candidate).is_file() {
                 return candidate;
