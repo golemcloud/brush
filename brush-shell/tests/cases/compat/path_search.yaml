@@ -93,3 +93,12 @@ cases:
       command -v tool | sed "s|^$work/||" | od -An -tx1
       . lib.sh
       compgen -c too
+
+  - name: "Sourcing a script with raw bytes in its name found through PATH"
+    stdin: |
+      # The harness compares the files left behind by name, so none is left.
+      trap 'cd /; rm -rf "$work"' EXIT
+      work=$PWD/work; mkdir -p "$work/lib"; cd "$work"
+      echo 'echo sourced raw' > "lib/s"$'\xfe'
+      PATH=$work/lib:$PATH
+      . s$'\xfe'
