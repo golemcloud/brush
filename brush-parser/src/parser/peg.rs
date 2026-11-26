@@ -873,15 +873,18 @@ fn negated(bangs: usize, expr: ast::ExtendedTestExpr) -> ast::ExtendedTestExpr {
     }
 }
 
-/// `text` without its line continuations: a backslash-newline outside single quotes and
-/// ANSI-C quotes, whose backslash no other backslash escapes.
+/// `text` without its line continuations: a backslash-newline that no other backslash escapes,
+/// outside single quotes and ANSI-C quotes. As in bash, a command substitution `$(...)` quotes
+/// on its own, even inside double quotes, and backquotes take quotes as text.
 fn without_line_continuations(text: &str) -> String {
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Quote {
-        None,
+    enum Context {
+        /// Commands, at the top or in `$(...)`, with the parentheses open in them.
+        Command(usize),
         Double,
         Single,
         AnsiC,
+        Backquote,
     }
 
     if !text.contains("\\\n") {
@@ -889,14 +892,19 @@ fn without_line_continuations(text: &str) -> String {
     }
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
-    let mut quote = Quote::None;
-    // Whether the last character was an unquoted, unescaped `$`, so a `'` opens ANSI-C quotes.
-    let mut dollar = false;
+    let mut contexts = vec![Context::Command(0)];
     while let Some(c) = chars.next() {
-        let after_dollar = std::mem::take(&mut dollar);
-        match (quote, c) {
-            (Quote::None | Quote::Double | Quote::AnsiC, '\\') => {
-                if quote != Quote::AnsiC && chars.peek() == Some(&'\n') {
+        let context = *contexts.last().unwrap_or(&Context::Command(0));
+        match (context, c) {
+            (Context::Single, '\'')
+            | (Context::AnsiC, '\'')
+            | (Context::Double, '"')
+            | (Context::Backquote, '`') => {
+                contexts.pop();
+            }
+            (Context::Single, _) => {}
+            (_, '\\') => {
+                if context != Context::AnsiC && chars.peek() == Some(&'\n') {
                     chars.next();
                     continue;
                 }
@@ -904,11 +912,33 @@ fn without_line_continuations(text: &str) -> String {
                 result.extend(chars.next());
                 continue;
             }
-            (Quote::None, '\'') if after_dollar => quote = Quote::AnsiC,
-            (Quote::None, '\'') => quote = Quote::Single,
-            (Quote::None, '"') => quote = Quote::Double,
-            (Quote::None, '$') => dollar = true,
-            (Quote::Double, '"') | (Quote::Single | Quote::AnsiC, '\'') => quote = Quote::None,
+            (Context::AnsiC | Context::Backquote, _) => {}
+            (Context::Command(_) | Context::Double, '`') => contexts.push(Context::Backquote),
+            (Context::Command(_) | Context::Double, '$') if chars.peek() == Some(&'(') => {
+                result.push(c);
+                result.extend(chars.next());
+                contexts.push(Context::Command(0));
+                continue;
+            }
+            (Context::Command(_), '$') if chars.peek() == Some(&'\'') => {
+                result.push(c);
+                result.extend(chars.next());
+                contexts.push(Context::AnsiC);
+                continue;
+            }
+            (Context::Command(_), '\'') => contexts.push(Context::Single),
+            (Context::Command(_), '"') => contexts.push(Context::Double),
+            (Context::Command(parens), '(') => {
+                contexts.pop();
+                contexts.push(Context::Command(parens + 1));
+            }
+            (Context::Command(parens), ')') if parens > 0 => {
+                contexts.pop();
+                contexts.push(Context::Command(parens - 1));
+            }
+            (Context::Command(0), ')') if contexts.len() > 1 => {
+                contexts.pop();
+            }
             _ => {}
         }
         result.push(c);

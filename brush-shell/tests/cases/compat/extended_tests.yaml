@@ -637,3 +637,20 @@ cases:
       f() { [[ ab =~ a\
       b ]]; }
       declare -f f
+
+  - name: "Regex with a line continuation in a nested substitution"
+    stdin: |
+      [[ ab =~ "$(printf %s 'a\
+      b')" ]] && echo m1 || echo n1
+      v=$(printf 'a\\\nb')
+      [[ $v =~ "$(printf %s 'a\
+      b')" ]] && echo m2 || echo n2
+      [[ ab =~ $(echo "a\
+      b") ]] && echo m3 || echo n3
+      [[ ab =~ `echo 'a\
+      b'` ]] && echo m4 || echo n4
+      (( y = $(echo "1 +\
+      2") )); echo "y=$y"
+      f() { [[ ab =~ "$(printf %s 'a\
+      b')" ]]; }
+      declare -f f
