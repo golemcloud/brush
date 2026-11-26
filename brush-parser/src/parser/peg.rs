@@ -896,8 +896,7 @@ fn without_line_continuations(text: &str) -> String {
     while let Some(c) = chars.next() {
         let context = *contexts.last().unwrap_or(&Context::Command(0));
         match (context, c) {
-            (Context::Single, '\'')
-            | (Context::AnsiC, '\'')
+            (Context::Single | Context::AnsiC, '\'')
             | (Context::Double, '"')
             | (Context::Backquote, '`') => {
                 contexts.pop();

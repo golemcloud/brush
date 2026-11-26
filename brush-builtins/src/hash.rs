@@ -102,18 +102,15 @@ impl builtins::Command for HashCommand {
                 // `hash -l` lists the table as commands that would rebuild it.
                 for (name, path) in cache.entries() {
                     let path = rawbytes::from_os_str(path.as_os_str());
-                    let line = format!("builtin hash -p {path} {name}\n");
-                    context.stdout().write_all(&rawbytes::encode(&line))?;
+                    write_line(&context, &format!("builtin hash -p {path} {name}"))?;
                 }
             } else if cache.is_empty() {
                 writeln!(context.stdout(), "hash: hash table empty")?;
             } else {
                 writeln!(context.stdout(), "hits\tcommand")?;
                 for (_, path) in cache.entries() {
-                    let mut line = b"   0\t".to_vec();
-                    line.extend_from_slice(path.as_os_str().as_encoded_bytes());
-                    line.push(b'\n');
-                    context.stdout().write_all(&line)?;
+                    let path = rawbytes::from_os_str(path.as_os_str());
+                    write_line(&context, &format!("   0\t{path}"))?;
                 }
             }
         } else {
@@ -158,4 +155,14 @@ impl builtins::Command for HashCommand {
 
         Ok(result)
     }
+}
+
+/// Writes `line` and a newline, as the bytes it stands for (see `rawbytes`).
+fn write_line(
+    context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+    line: &str,
+) -> std::io::Result<()> {
+    let mut bytes = rawbytes::encode(line).into_owned();
+    bytes.push(b'\n');
+    context.stdout().write_all(&bytes)
 }

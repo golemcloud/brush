@@ -169,7 +169,7 @@ impl From<PatternWord> for Pattern {
 /// bytes that together make a character become it, also where pieces meet (`$a$b`). Such a
 /// character has no pattern meaning, so it may move from one piece to the one before.
 fn normalized(mut pieces: PatternWord) -> PatternWord {
-    fn text(piece: &mut PatternPiece) -> &mut String {
+    const fn text(piece: &mut PatternPiece) -> &mut String {
         match piece {
             PatternPiece::Pattern(s) | PatternPiece::Literal(s) => s,
         }
@@ -200,7 +200,10 @@ fn normalized(mut pieces: PatternWord) -> PatternWord {
         let (Some(tail), Some(lead)) = (tail, lead) else {
             continue;
         };
-        let joined = std::format!("{}{}", &previous[tail..], &current[..lead]);
+        let (Some(ending), Some(starting)) = (previous.get(tail..), current.get(..lead)) else {
+            continue;
+        };
+        let joined = std::format!("{ending}{starting}");
         let normal = rawbytes::normalize(joined.clone());
         if normal != joined {
             previous.truncate(tail);
