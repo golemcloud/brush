@@ -873,16 +873,61 @@ fn negated(bangs: usize, expr: ast::ExtendedTestExpr) -> ast::ExtendedTestExpr {
     }
 }
 
+/// `text` without its line continuations: a backslash-newline outside single quotes and
+/// ANSI-C quotes, whose backslash no other backslash escapes.
+fn without_line_continuations(text: &str) -> String {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Double,
+        Single,
+        AnsiC,
+    }
+
+    if !text.contains("\\\n") {
+        return text.to_owned();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quote = Quote::None;
+    // Whether the last character was an unquoted, unescaped `$`, so a `'` opens ANSI-C quotes.
+    let mut dollar = false;
+    while let Some(c) = chars.next() {
+        let after_dollar = std::mem::take(&mut dollar);
+        match (quote, c) {
+            (Quote::None | Quote::Double | Quote::AnsiC, '\\') => {
+                if quote != Quote::AnsiC && chars.peek() == Some(&'\n') {
+                    chars.next();
+                    continue;
+                }
+                result.push(c);
+                result.extend(chars.next());
+                continue;
+            }
+            (Quote::None, '\'') if after_dollar => quote = Quote::AnsiC,
+            (Quote::None, '\'') => quote = Quote::Single,
+            (Quote::None, '"') => quote = Quote::Double,
+            (Quote::None, '$') => dollar = true,
+            (Quote::Double, '"') | (Quote::Single | Quote::AnsiC, '\'') => quote = Quote::None,
+            _ => {}
+        }
+        result.push(c);
+    }
+    result
+}
+
 #[inline]
 fn locations_are_contiguous(loc_left: &crate::SourceSpan, loc_right: &crate::SourceSpan) -> bool {
     loc_left.end.index == loc_right.start.index
 }
 
 impl Tokens<'_> {
-    /// The source text from character `from` to character `to`, when the source is known.
+    /// The source text from character `from` to character `to`, when the source is known, with
+    /// each line continuation (an unquoted backslash-newline) removed, as bash reads it.
     fn source_text(&self, from: usize, to: usize) -> Option<String> {
         let source = self.source?;
-        (from <= to).then(|| source.chars().skip(from).take(to - from).collect())
+        let text = source.get(self.byte_offset(from)?..self.byte_offset(to)?)?;
+        Some(without_line_continuations(text))
     }
 
     /// The source text after the token `from` and before the token `to`.

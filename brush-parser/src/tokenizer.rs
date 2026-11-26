@@ -215,11 +215,45 @@ impl TokenizerError {
 
 /// Encapsulates a sequence of tokens.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "`tokens` names the sequence the type encapsulates"
+)]
 pub(crate) struct Tokens<'a> {
     /// Sequence of tokens.
     pub tokens: &'a [Token],
     /// The text the tokens were read from, when known.
     pub source: Option<&'a str>,
+    /// The byte offset in `source` of each character the tokens' locations count, then the
+    /// length of `source`; empty when `source` is unknown or ASCII, where the two agree.
+    char_starts: Vec<usize>,
+}
+
+impl<'a> Tokens<'a> {
+    pub fn new(tokens: &'a [Token], source: Option<&'a str>) -> Self {
+        let char_starts = match source {
+            Some(text) if !text.is_ascii() => text
+                .char_indices()
+                .map(|(offset, _)| offset)
+                .chain(std::iter::once(text.len()))
+                .collect(),
+            _ => vec![],
+        };
+        Self {
+            tokens,
+            source,
+            char_starts,
+        }
+    }
+
+    /// The byte offset in the source of the character at `index`.
+    pub fn byte_offset(&self, index: usize) -> Option<usize> {
+        if self.char_starts.is_empty() {
+            Some(index)
+        } else {
+            self.char_starts.get(index).copied()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

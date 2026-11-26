@@ -14,3 +14,17 @@ cases:
     stdin: |
       (( (0) == 0 )) && echo "0 == 0"
       (( (1) != 0 )) && echo "1 != 0"
+
+  - name: "Arithmetic statement with a line continuation"
+    stdin: |
+      (( x = 1 + \
+      2 )); echo $x
+      f() { (( y = 1 + \
+      2 )); }
+      declare -f f
+
+  - name: "Many arithmetic statements in a script with non-ASCII text"
+    stdin: |
+      printf '(( x++ )) # é\n%.0s' {1..20000} > script.sh
+      . ./script.sh
+      echo $x

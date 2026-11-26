@@ -622,3 +622,18 @@ cases:
       [[ ${BASH_REMATCH[0]} == "$v" ]] && echo "whole match"
       [[ ${BASH_REMATCH[1]} == $'\xff' ]] && echo "group"
       env printf '%s' "${BASH_REMATCH[@]}" | od -An -tx1
+
+  - name: "Regex with a line continuation"
+    stdin: |
+      [[ ab =~ a\
+      b ]] && echo m
+      [[ ab =~ "a\
+      b" ]] && echo dq
+      v=$(printf 'a\\\nb')
+      [[ $v =~ 'a\
+      b' ]] && echo sq
+      [[ $v =~ a\\\
+      b ]] && echo escaped
+      f() { [[ ab =~ a\
+      b ]]; }
+      declare -f f

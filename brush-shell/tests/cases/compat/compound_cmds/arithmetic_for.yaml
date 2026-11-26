@@ -108,3 +108,11 @@ cases:
         echo "ref=$ref target=$target"
       done
       echo "final target=$target"
+
+  - name: "Arithmetic for loop with a line continuation"
+    stdin: |
+      for (( i = 0; i < \
+      2; i++ )); do echo $i; done
+      f() { for (( j = 0; j < \
+      1; j++ )); do :; done; }
+      declare -f f
