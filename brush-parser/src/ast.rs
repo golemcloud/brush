@@ -1096,13 +1096,30 @@ impl SourceLocation for IfClauseCommand {
 
 impl Display for IfClauseCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        IfClauseParts {
+            condition: &self.condition,
+            then: &self.then,
+            elses: self.elses.as_deref().unwrap_or_default(),
+        }
+        .fmt(f)
+    }
+}
+
+/// A conditional command written from its parts, so that an `elif` is written as an `if` without
+/// copying the clauses after it.
+struct IfClauseParts<'a> {
+    condition: &'a CompoundList,
+    then: &'a CompoundList,
+    elses: &'a [ElseClause],
+}
+
+impl Display for IfClauseParts<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "if {}", self.condition)?;
         write_condition_end(f)?;
         writeln!(f, "then")?;
         write!(indented(f), "{}", self.then.terminated())?;
-        if let Some(elses) = &self.elses {
-            fmt_else_clauses(f, elses, &self.loc)?;
-        }
+        fmt_else_clauses(f, self.elses)?;
 
         writeln!(f)?;
         write!(f, "fi")?;
@@ -1113,11 +1130,7 @@ impl Display for IfClauseCommand {
 
 /// Writes the `else` clauses of a conditional command as bash writes them: an `elif` is an `if`
 /// nested in an `else`.
-fn fmt_else_clauses(
-    f: &mut std::fmt::Formatter<'_>,
-    elses: &[ElseClause],
-    loc: &SourceSpan,
-) -> std::fmt::Result {
+fn fmt_else_clauses(f: &mut std::fmt::Formatter<'_>, elses: &[ElseClause]) -> std::fmt::Result {
     let Some((first, rest)) = elses.split_first() else {
         return Ok(());
     };
@@ -1126,24 +1139,30 @@ fn fmt_else_clauses(
     let Some(condition) = &first.condition else {
         return write!(indented(f), "{}", first.body.terminated());
     };
-    let nested = IfClauseCommand {
-        condition: condition.clone(),
-        then: first.body.clone(),
-        elses: (!rest.is_empty()).then(|| rest.to_vec()),
-        loc: loc.clone(),
+    let nested = IfClauseParts {
+        condition,
+        then: &first.body,
+        elses: rest,
     };
-    let list = CompoundList(vec![CompoundListItem(
-        AndOrList {
-            first: Pipeline {
-                timed: None,
-                bang: false,
-                seq: vec![Command::Compound(CompoundCommand::IfClause(nested), None)],
-            },
-            additional: vec![],
-        },
-        SeparatorOperator::Sequence,
-    )]);
-    write!(indented(f), "{}", list.terminated())
+    write!(indented(f), "{}", ElseIf(nested))
+}
+
+/// The `if` an `elif` is written as, as the one command of the list in an `else`, terminated (see
+/// [`CompoundList::fmt_items`]).
+struct ElseIf<'a>(IfClauseParts<'a>);
+
+impl Display for ElseIf<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let here_doc_bodies = hold_here_doc_bodies();
+        write!(f, "{}", self.0)?;
+        if !write_here_doc_bodies(f)? && !take_after_here_doc() {
+            write!(f, "{}", SeparatorOperator::Sequence)?;
+        }
+        if here_doc_bodies.outermost {
+            write_here_doc_bodies(f)?;
+        }
+        Ok(())
+    }
 }
 
 /// Represents the `else` clause of a conditional command.
@@ -2912,6 +2931,23 @@ mod tests {
         let shown = function_text(&parse(source));
         assert_eq!(shown, expected);
         assert_eq!(function_text(&parse(&shown)), expected);
+    }
+
+    #[test]
+    fn display_of_many_elifs_keeps_to_a_bounded_stack() {
+        // Each `elif` is written as an `if` nested in an `else`, one level deeper.
+        let source = std::format!(
+            "f() {{ if a; then :\n{}fi; }}\n",
+            "elif a; then :\n".repeat(400)
+        );
+        let shown = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || function_text(&parse(&source)))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(shown.matches("if a").count(), 401);
+        assert_eq!(shown.matches("fi").count(), 401);
     }
 
     #[test]
