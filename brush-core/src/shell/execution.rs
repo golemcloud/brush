@@ -204,8 +204,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         call_type: callstack::ScriptCallType,
     ) -> Result<ExecutionResult, error::Error> {
         // The text is kept to word a syntax error as bash does.
-        let mut text = String::new();
-        std::io::BufReader::new(file).read_to_string(&mut text)?;
+        // A script is bytes, kept as the shell keeps bytes that are not UTF-8 (see `rawbytes`).
+        let mut bytes = Vec::new();
+        std::io::BufReader::new(file).read_to_end(&mut bytes)?;
+        let text = crate::rawbytes::decode_vec(bytes);
 
         tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
         let parse_result = self.parse_string(text.as_str());

@@ -137,3 +137,17 @@ cases:
       echo [fg]"$n" | od -An -tx1
       compgen -f f | od -An -tx1
       [[ f$n == f* ]] && echo match
+
+  - name: "Scripts, arguments and the environment keep raw bytes"
+    stdin: |
+      printf 'echo "\xf4\x8f\xbe\x80"\n' > s1.sh
+      "$BASH" s1.sh | od -An -tx1
+      E2=$(printf '\xf4\x8f\xbe\x80') "$BASH" -c 'echo "$E2" | od -An -tx1'
+      E3=$(printf '\xffa') "$BASH" -c 'echo "$E3" | od -An -tx1; env | grep -a "^E3=" | od -An -tx1'
+      printf 'echo "$1" | od -An -tx1\n' > a.sh
+      "$BASH" a.sh $'\xff'
+      printf 'echo "x\xffy" | od -An -tx1\n' > b.sh
+      "$BASH" b.sh
+      "$BASH" -c $'echo "\xfe" | od -An -tx1'
+      "$BASH" -c 'echo "$0" | od -An -tx1' $'z\xfd'
+      printf 'echo "\xf4\x8f\xbe\x80"\necho "a\xffb"\n' | "$BASH" | od -An -tx1
