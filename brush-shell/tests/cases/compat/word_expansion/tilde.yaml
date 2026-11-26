@@ -183,3 +183,17 @@ cases:
       - path: "file.txt.bak"
     stdin: |
       echo ~/{file.txt,file.txt.bak}
+
+  - name: "Tilde expansion keeps raw bytes in the home and working directories"
+    stdin: |
+      HOME=$'/x\xff'
+      echo ~ | od -An -tx1
+      echo ~/a | od -An -tx1
+      trap 'cd /; rm -rf "$work"' EXIT
+      work=$PWD/work; mkdir -p "$work/d"$'\xfe'; cd "$work/d"$'\xfe'
+      echo ~+ | sed "s|^$work/||" | od -An -tx1
+
+  - name: "Default history file keeps raw bytes in the home directory"
+    ignore_stderr: true
+    stdin: |
+      HOME=$'/x\xff' "$BASH" --norc -i -c 'echo "${HISTFILE%/*}" | od -An -tx1' < /dev/null

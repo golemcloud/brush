@@ -1474,16 +1474,18 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 self.shell
                     .home_dir()
                     .map_or(Cow::Borrowed("/"), |home_dir| {
-                        Cow::Owned(home_dir.to_string_lossy().to_string())
+                        Cow::Owned(crate::rawbytes::from_os_str(home_dir.as_os_str()).into_owned())
                     })
             }
             brush_parser::word::TildeExpr::UserHome(username) => {
                 sys::users::get_user_home_dir(username).map_or_else(
                     || Cow::Owned(std::format!("~{username}")),
-                    |p| Cow::Owned(p.to_string_lossy().to_string()),
+                    |p| Cow::Owned(crate::rawbytes::from_os_str(p.as_os_str()).into_owned()),
                 )
             }
-            brush_parser::word::TildeExpr::WorkingDir => self.shell.working_dir().to_string_lossy(),
+            brush_parser::word::TildeExpr::WorkingDir => {
+                crate::rawbytes::from_os_str(self.shell.working_dir().as_os_str())
+            }
             // With OLDPWD unset (declared, as at startup, but given no value), `~-` stays as is.
             brush_parser::word::TildeExpr::OldWorkingDir => match self.shell.env_str("OLDPWD") {
                 Some(old_pwd) if self.shell.env().is_set("OLDPWD") => old_pwd,
@@ -1493,23 +1495,23 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 let dir_stack_count = self.shell.directory_stack().len();
 
                 if let Some(dir) = self.shell.directory_stack().get(*n) {
-                    dir.to_string_lossy()
+                    crate::rawbytes::from_os_str(dir.as_os_str())
                 } else if *n == dir_stack_count {
-                    self.shell.working_dir().to_string_lossy()
+                    crate::rawbytes::from_os_str(self.shell.working_dir().as_os_str())
                 } else {
                     Cow::Owned(std::format!("~-{n}"))
                 }
             }
             brush_parser::word::TildeExpr::NthDirFromTopOfDirStack { n, plus_used } => {
                 if *n == 0 {
-                    return self.shell.working_dir().to_string_lossy();
+                    return crate::rawbytes::from_os_str(self.shell.working_dir().as_os_str());
                 }
 
                 let dir_stack_count = self.shell.directory_stack().len();
                 if dir_stack_count >= *n
                     && let Some(dir) = self.shell.directory_stack().get(dir_stack_count - *n)
                 {
-                    return dir.to_string_lossy();
+                    return crate::rawbytes::from_os_str(dir.as_os_str());
                 }
 
                 let plus_or_nothing = if *plus_used { "+" } else { "" };

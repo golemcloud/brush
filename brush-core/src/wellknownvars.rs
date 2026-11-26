@@ -337,7 +337,9 @@ pub(crate) fn init_well_known_vars(
         let histfile = home_dir.join(".brush_history");
         shell.env_mut().set_global(
             "HISTFILE",
-            ShellVariable::new(ShellValue::String(histfile.to_string_lossy().to_string())),
+            ShellVariable::new(ShellValue::String(
+                crate::rawbytes::from_os_str(histfile.as_os_str()).into_owned(),
+            )),
         )?;
     }
 
