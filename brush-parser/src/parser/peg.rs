@@ -918,13 +918,28 @@ fn push_without_line_continuations(
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
         let quote = quotes.last().copied();
-        if c == '$'
-            && matches!(quote, None | Some(Quote::Double))
-            && let Ok(Some((inner, body_start, end))) = crate::tokenizer::dollar_expansion_extent(
-                rest,
-                body == Some(ExpansionBody::Arithmetic),
-                options,
-            )
+        let expansion = if c == '$' && matches!(quote, None | Some(Quote::Double)) {
+            let in_arithmetic = body == Some(ExpansionBody::Arithmetic);
+            crate::tokenizer::dollar_expansion_extent(rest, in_arithmetic, options)
+                .ok()
+                .flatten()
+        } else if matches!(c, '<' | '>')
+            && quote.is_none()
+            && commands
+            && !comment_may_start
+            && !options.sh_mode
+            && rest.get(1..2) == Some("(")
+        {
+            // As the tokenizer reads it, `<(` or `>(` inside a word in a command starts a
+            // process substitution, read through its `)` as part of the word, like a command
+            // substitution.
+            crate::tokenizer::command_substitution_len(rest.get(2..).unwrap_or_default(), options)
+                .ok()
+                .map(|len| (ExpansionBody::Commands, 2, len + 2))
+        } else {
+            None
+        };
+        if let Some((inner, body_start, end)) = expansion
             && let (Some(open), Some(inner_text), Some(close)) = (
                 rest.get(..body_start),
                 rest.get(body_start..end.saturating_sub(1)),
@@ -937,30 +952,6 @@ fn push_without_line_continuations(
             result.push_str(close);
             rest = rest.get(end..).unwrap_or_default();
             comment_may_start = false;
-            continue;
-        }
-        // As the tokenizer reads it, `<(` or `>(` inside a word in a command starts a process
-        // substitution, read through its `)` as part of the word, like a command substitution.
-        if matches!(c, '<' | '>')
-            && quote.is_none()
-            && commands
-            && !comment_may_start
-            && !options.sh_mode
-            && let Some(inner) = rest.get(1..).and_then(|after| after.strip_prefix('('))
-            && let Ok(len) = crate::tokenizer::command_substitution_len(inner, options)
-            && let Some(list) = inner.get(..len.saturating_sub(1))
-        {
-            result.push(c);
-            result.push('(');
-            push_without_line_continuations(
-                list,
-                Some(ExpansionBody::Commands),
-                false,
-                options,
-                result,
-            );
-            result.push(')');
-            rest = inner.get(len..).unwrap_or_default();
             continue;
         }
         rest = rest.get(c.len_utf8()..).unwrap_or_default();
