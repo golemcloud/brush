@@ -151,6 +151,11 @@ pub enum TokenizerError {
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
 
+    /// Substitutions and expansions are nested deeper than the tokenizer reads, which recurses
+    /// once per level.
+    #[error("maximum nesting level exceeded: deeper nesting is unsupported in bash-tool")]
+    NestedTooDeeply,
+
     /// Parsing the input would take more memory than the embedder allows (see
     /// [`set_parse_budget`]): the tokens and characters read when it stopped.
     #[error("input too large to parse")]
@@ -164,6 +169,10 @@ pub enum TokenizerError {
 
 /// What a parse may hold, as the embedder sets it with [`set_parse_budget`].
 static PARSE_BUDGET: std::sync::OnceLock<fn(usize, usize) -> bool> = std::sync::OnceLock::new();
+
+/// How deeply `$(...)`, `${...}`, `$((...))`, `$[...]` and process substitutions may nest; the
+/// word parser, which reads them again, takes no deeper nesting either.
+const MAX_NESTED_CONSTRUCTS: u32 = 128;
 
 /// Characters read between checks of the parse budget.
 const CHARS_PER_BUDGET_CHECK: usize = 4096;
@@ -645,7 +654,7 @@ pub(crate) fn command_substitution_len(
     let mut reader = std::io::BufReader::new(text.as_bytes());
     let mut tokenizer = Tokenizer::new(&mut reader, options);
     let mut state = TokenParseState::new(&tokenizer.cross_state.cursor);
-    let pending = tokenizer.set_aside_pending_here_docs();
+    let pending = tokenizer.set_aside_pending_here_docs()?;
     tokenizer.consume_nested_construct(&mut state, ')', "(", 1)?;
     tokenizer.restore_pending_here_docs(pending);
     let chars = tokenizer.cross_state.cursor.index;
@@ -804,14 +813,22 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     /// The construct's tokens belong to it, not to the tokens queued up after a pending here tag,
     /// and the pending bodies start on the line after the one the construct ends on, as in bash.
     /// A here-document opened inside the construct is tokenized there.
-    fn set_aside_pending_here_docs(&mut self) -> (HereState, Vec<HereTag>, bool, bool) {
+    ///
+    /// A construct nested deeper than [`MAX_NESTED_CONSTRUCTS`] fails instead of exhausting the
+    /// stack.
+    fn set_aside_pending_here_docs(
+        &mut self,
+    ) -> Result<(HereState, Vec<HereTag>, bool, bool), TokenizerError> {
+        if self.cross_state.nested_constructs >= MAX_NESTED_CONSTRUCTS {
+            return Err(TokenizerError::NestedTooDeeply);
+        }
         self.cross_state.nested_constructs += 1;
-        (
+        Ok((
             std::mem::take(&mut self.cross_state.here_state),
             std::mem::take(&mut self.cross_state.current_here_tags),
             std::mem::replace(&mut self.cross_state.command_position, false),
             std::mem::replace(&mut self.cross_state.compound_assignment, false),
-        )
+        ))
     }
 
     /// Restores here-documents set aside by `set_aside_pending_here_docs`, keeping any the
@@ -1264,7 +1281,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                             // Bash names the line an arithmetic expansion left open began on.
                             let start = self.cross_state.cursor.clone();
-                            let pending = self.set_aside_pending_here_docs();
+                            let pending = self.set_aside_pending_here_docs()?;
                             self.consume_nested_construct(&mut state, ')', "(", initial_nesting)
                                 .map_err(|error| match error {
                                     TokenizerError::UnterminatedExpansion(closing)
@@ -1293,7 +1310,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             self.cross_state.arithmetic_expansion = true;
 
                             let start = self.cross_state.cursor.clone();
-                            let pending = self.set_aside_pending_here_docs();
+                            let pending = self.set_aside_pending_here_docs()?;
                             self.consume_nested_construct(&mut state, ']', "[", 1)
                                 .map_err(|error| match error {
                                     TokenizerError::UnterminatedExpansion(closing) => {
@@ -1316,7 +1333,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // `${ command; }` and `${| command; }` (bash 5.3) hold a command,
                             // read like the one in `$(...)`.
                             if matches!(self.peek_char()?, Some(' ' | '\t' | '\n' | '|')) {
-                                let pending = self.set_aside_pending_here_docs();
+                                let pending = self.set_aside_pending_here_docs()?;
                                 self.consume_nested_construct(&mut state, '}', "{", 1)?;
                                 self.restore_pending_here_docs(pending);
                                 continue;
@@ -1324,7 +1341,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                             // Bash names the line a parameter expansion left open began on.
                             let start = self.cross_state.cursor.clone();
-                            let pending = self.set_aside_pending_here_docs();
+                            let pending = self.set_aside_pending_here_docs()?;
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
 
@@ -1520,7 +1537,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 self.consume_char()?;
                 state.append_char('(');
 
-                let pending = self.set_aside_pending_here_docs();
+                let pending = self.set_aside_pending_here_docs()?;
                 self.consume_nested_construct(&mut state, ')', "(", 1)?;
                 self.restore_pending_here_docs(pending);
             //
@@ -2656,6 +2673,29 @@ HERE2
         assert_eq!(unquote_str(r#""a\$b""#), "a$b");
         // Outside quotes, backslash escapes the next character.
         assert_eq!(unquote_str(r"hel\'lo"), "hel'lo");
+    }
+
+    #[test]
+    fn deeply_nested_constructs_fail_before_the_stack_runs_out() {
+        let options = TokenizerOptions::default();
+        for (open, close, depth) in [
+            ("$(echo ", ")", 2000),
+            ("${x:-", "}", 10_000),
+            ("${ echo ", "; }", 2000),
+            ("$((", "))", 10_000),
+            ("$[", "]", 10_000),
+        ] {
+            let text = format!("echo {}x{}", open.repeat(depth), close.repeat(depth));
+            assert!(
+                matches!(
+                    uncached_tokenize_str(&text, &options),
+                    Err(TokenizerError::NestedTooDeeply)
+                ),
+                "{open}"
+            );
+            let text = format!("echo {}x{}", open.repeat(100), close.repeat(100));
+            assert!(uncached_tokenize_str(&text, &options).is_ok(), "{open}");
+        }
     }
 
     #[test]
