@@ -686,3 +686,13 @@ cases:
       y=1
       [[ 3ab =~ "$(( (y) + "${y:+2}" ))"a\
       b ]] && echo ok3 || echo no3
+
+  - name: "Regex with a line continuation after a parameter expansion in a substitution"
+    stdin: |
+      [[ $'#a\nb cd' =~ "$(echo ${y:- #'a
+      b'} 'c\
+      d')" ]] && echo m1 || echo n1
+      x=1
+      [[ $'1 #a\nb cd' =~ "$(echo ${x/1/1 #\'a
+      b\'} 'c\
+      d')" ]] && echo m2 || echo n2

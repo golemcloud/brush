@@ -763,12 +763,6 @@ fn uncached_parse(
     Ok(pieces)
 }
 
-/// Whether a `#` after `previous`, outside quotes and not escaped, starts a comment: after a
-/// blank or a newline.
-pub(crate) const fn starts_comment_after(previous: char) -> bool {
-    matches!(previous, ' ' | '\t' | '\n')
-}
-
 /// Whether bash, reading `$((expr))` as a command substitution to find where it ends, takes a
 /// `#` in `expr` for a comment that runs past the closing `))` (`$((1 # c))`): a `#` after a
 /// blank or a newline, outside quotes and not escaped, with no newline after it.
@@ -790,7 +784,7 @@ fn comment_hides_close(expr: &str) -> bool {
         } else {
             match c {
                 '\'' | '"' => quote = Some(c),
-                '#' if starts_comment_after(previous) => in_comment = true,
+                '#' if matches!(previous, ' ' | '\t' | '\n') => in_comment = true,
                 _ => (),
             }
         }

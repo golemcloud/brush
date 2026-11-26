@@ -2,6 +2,7 @@
 
 use super::{ParseResult, test_with_snapshot};
 use crate::assert_snapshot_redacted;
+use crate::parser::ParserOptions;
 use anyhow::Result;
 
 // File tests
@@ -137,6 +138,17 @@ fn parse_extended_test_regex_with_spaces() -> Result<()> {
         input,
         result: &result
     });
+    Ok(())
+}
+
+#[test]
+fn parse_extended_test_regex_keeps_quoted_continuation_after_parameter_in_arithmetic() -> Result<()>
+{
+    // The tokenizer ends `${x:-(}` at its brace, so the `(` in it leaves `$((...))` closed.
+    let input = "[[ 1ab =~ \"$(( ${x:-(} ))\"'a\\\nb' ]]";
+    let program =
+        crate::parser::Parser::new(input.as_bytes(), &ParserOptions::default()).parse_program()?;
+    anyhow::ensure!(program.to_string().contains("'a\\\nb'"), "{program}");
     Ok(())
 }
 

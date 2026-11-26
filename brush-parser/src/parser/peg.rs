@@ -2,7 +2,7 @@
 
 use crate::SourceSpan;
 use crate::ast::{self, SeparatorOperator, SourceLocation, maybe_location};
-use crate::tokenizer::Token;
+use crate::tokenizer::{ExpansionBody, Token};
 use crate::word;
 
 use super::{ParserOptions, Tokens};
@@ -874,47 +874,81 @@ fn negated(bangs: usize, expr: ast::ExtendedTestExpr) -> ast::ExtendedTestExpr {
 }
 
 /// `text` without its line continuations: a backslash-newline that no other backslash escapes,
-/// outside single quotes, ANSI-C quotes and comments. As in bash, a command substitution `$(...)`
-/// and an arithmetic expansion `$((...))` quote on their own, even inside double quotes. A
-/// command substitution ends where the tokenizer finds its `)` (past the `)` of a case pattern,
-/// or a quote in a comment), and its text, read as `commands`, loses its own continuations.
-/// Backquotes take quotes as text.
-fn without_line_continuations(
-    text: &str,
-    commands: bool,
-    options: &crate::TokenizerOptions,
-) -> String {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Context {
-        Double,
-        Single,
-        AnsiC,
-        Backquote,
-        /// In `$((...))`, with the parentheses open in it, as the tokenizer counts them.
-        Arithmetic(usize),
-    }
-
+/// outside single quotes, ANSI-C quotes and comments, as bash reads it. Backquotes take quotes
+/// as text.
+fn without_line_continuations(text: &str, options: &crate::TokenizerOptions) -> String {
     if !text.contains("\\\n") {
         return text.to_owned();
     }
     let mut result = String::with_capacity(text.len());
-    let mut contexts = vec![];
+    push_without_line_continuations(text, None, false, options, &mut result);
+    result
+}
+
+/// Pushes `text`, the body of an expansion that holds `body` (or the top text, for `None`),
+/// without its line continuations; `in_double` when it starts inside double quotes.
+///
+/// Each expansion that starts with `$` ends where the tokenizer ends it, and its body loses its
+/// own continuations: as in bash, a command substitution and an arithmetic expansion quote on
+/// their own even inside double quotes, and a `#` in a command starts a comment where the
+/// tokenizer starts one. Inside double quotes, a parameter expansion's body keeps the double
+/// quotes' rules, where bash removes a backslash-newline when it expands the body.
+fn push_without_line_continuations(
+    text: &str,
+    body: Option<ExpansionBody>,
+    in_double: bool,
+    options: &crate::TokenizerOptions,
+    result: &mut String,
+) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        Double,
+        Single,
+        AnsiC,
+        Backquote,
+    }
+
+    let commands = body == Some(ExpansionBody::Commands);
+    let mut quotes = if in_double {
+        vec![Quote::Double]
+    } else {
+        vec![]
+    };
+    let mut comment_may_start = commands;
     let mut rest = text;
-    // The character before, in commands outside any context: a `#` after a blank, a newline or
-    // a `;`, `&` or `|` starts a comment, as the tokenizer reads it.
-    let mut previous = '\n';
     while let Some(c) = rest.chars().next() {
+        let quote = quotes.last().copied();
+        if c == '$'
+            && matches!(quote, None | Some(Quote::Double))
+            && let Ok(Some((inner, body_start, end))) = crate::tokenizer::dollar_expansion_extent(
+                rest,
+                body == Some(ExpansionBody::Arithmetic),
+                options,
+            )
+            && let (Some(open), Some(inner_text), Some(close)) = (
+                rest.get(..body_start),
+                rest.get(body_start..end.saturating_sub(1)),
+                rest.get(end.saturating_sub(1)..end),
+            )
+        {
+            result.push_str(open);
+            let in_double = quote.is_some() && inner == ExpansionBody::Parameter;
+            push_without_line_continuations(inner_text, Some(inner), in_double, options, result);
+            result.push_str(close);
+            rest = rest.get(end..).unwrap_or_default();
+            comment_may_start = false;
+            continue;
+        }
         rest = rest.get(c.len_utf8()..).unwrap_or_default();
-        let context = contexts.last().copied();
-        match (context, c) {
-            (Some(Context::Single | Context::AnsiC), '\'')
-            | (Some(Context::Double), '"')
-            | (Some(Context::Backquote), '`') => {
-                contexts.pop();
+        match (quote, c) {
+            (Some(Quote::Single | Quote::AnsiC), '\'')
+            | (Some(Quote::Double), '"')
+            | (Some(Quote::Backquote), '`') => {
+                quotes.pop();
             }
-            (Some(Context::Single), _) => {}
+            (Some(Quote::Single), _) => {}
             (_, '\\') => {
-                if context != Some(Context::AnsiC)
+                if quote != Some(Quote::AnsiC)
                     && let Some(after) = rest.strip_prefix('\n')
                 {
                     rest = after;
@@ -925,56 +959,20 @@ fn without_line_continuations(
                     result.push(next);
                     rest = rest.get(next.len_utf8()..).unwrap_or_default();
                 }
-                previous = c;
+                comment_may_start = false;
                 continue;
             }
-            (Some(Context::AnsiC | Context::Backquote), _) => {}
-            (None | Some(Context::Double | Context::Arithmetic(_)), '`') => {
-                contexts.push(Context::Backquote);
-            }
-            (None | Some(Context::Double | Context::Arithmetic(_)), '$')
-                if rest.starts_with("((") =>
-            {
-                result.push_str("$((");
-                rest = rest.get(2..).unwrap_or_default();
-                contexts.push(Context::Arithmetic(2));
-                continue;
-            }
-            (None | Some(Context::Double | Context::Arithmetic(_)), '$')
-                if rest.starts_with('(') =>
-            {
-                let inner = rest.get(1..).unwrap_or_default();
-                if let Ok(len) = crate::tokenizer::command_substitution_len(inner, options)
-                    && let Some(command) = inner.get(..len.saturating_sub(1))
-                {
-                    result.push_str("$(");
-                    result.push_str(&without_line_continuations(command, true, options));
-                    result.push(')');
-                    rest = inner.get(len..).unwrap_or_default();
-                    previous = ')';
-                    continue;
-                }
-            }
-            (None | Some(Context::Arithmetic(_)), '$') if rest.starts_with('\'') => {
+            (Some(Quote::AnsiC | Quote::Backquote), _) => {}
+            (None | Some(Quote::Double), '`') => quotes.push(Quote::Backquote),
+            (None, '$') if rest.starts_with('\'') => {
                 result.push_str("$'");
                 rest = rest.get(1..).unwrap_or_default();
-                contexts.push(Context::AnsiC);
+                quotes.push(Quote::AnsiC);
                 continue;
             }
-            (None | Some(Context::Arithmetic(_)), '\'') => contexts.push(Context::Single),
-            (None | Some(Context::Arithmetic(_)), '"') => contexts.push(Context::Double),
-            (Some(Context::Arithmetic(open)), '(' | ')') => {
-                contexts.pop();
-                let open = if c == '(' { open + 1 } else { open - 1 };
-                if open > 0 {
-                    contexts.push(Context::Arithmetic(open));
-                }
-            }
-            (None, '#')
-                if commands
-                    && (crate::word::starts_comment_after(previous)
-                        || matches!(previous, ';' | '&' | '|')) =>
-            {
+            (None, '\'') => quotes.push(Quote::Single),
+            (None, '"') => quotes.push(Quote::Double),
+            (None, '#') if comment_may_start => {
                 let comment = rest.find('\n').unwrap_or(rest.len());
                 result.push(c);
                 result.push_str(rest.get(..comment).unwrap_or_default());
@@ -984,9 +982,9 @@ fn without_line_continuations(
             _ => {}
         }
         result.push(c);
-        previous = c;
+        comment_may_start =
+            commands && (crate::tokenizer::is_blank(c) || matches!(c, '\n' | ';' | '&' | '|'));
     }
-    result
 }
 
 #[inline]
@@ -1000,7 +998,7 @@ impl Tokens<'_> {
     fn source_text(&self, from: usize, to: usize) -> Option<String> {
         let source = self.source?;
         let text = source.get(self.byte_offset(from)?..self.byte_offset(to)?)?;
-        Some(without_line_continuations(text, false, &self.options))
+        Some(without_line_continuations(text, &self.options))
     }
 
     /// The source text after the token `from` and before the token `to`.
