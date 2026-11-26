@@ -292,3 +292,9 @@ cases:
       EOF
       )
       echo $var
+
+  - name: "Here-document with many unclosed brackets in its text"
+    stdin: |
+      x=1
+      { echo 'cat <<EOF'; echo 'x=$x'; printf 'print("[")\n%.0s' {1..70}; printf 'f(${x}\n%.0s' {1..70}; echo '$(echo "[")'; echo 'EOF'; } > script.sh
+      . ./script.sh | sort | uniq -c

@@ -646,7 +646,8 @@ fn check_nesting(text: &str, quotes: bool) -> Result<(), error::WordParseError> 
 
 /// The deepest nesting of brackets and substitutions in `text`, found in one pass without
 /// recursing: `$(`, `${` and `$[` count everywhere, other brackets outside double quotes. With
-/// `quotes`, single-quoted text is skipped; otherwise (a here-document body) quotes are text.
+/// `quotes`, single-quoted text is skipped; otherwise (a here-document body or arithmetic text)
+/// quotes and other brackets are text until a `$(`, `${` or `$[` opens.
 fn nesting(text: &str, quotes: bool) -> usize {
     let bytes = text.as_bytes();
     // The closing bracket each open level waits for; `"` marks double quotes, which do not nest.
@@ -655,6 +656,7 @@ fn nesting(text: &str, quotes: bool) -> usize {
     let mut index = 0;
     while index < bytes.len() {
         let quoted = open.last() == Some(&b'"');
+        let quotes = quotes || !open.is_empty();
         match bytes[index] {
             b'\\' => index += 1,
             b'$' if matches!(bytes.get(index + 1), Some(b'(' | b'{' | b'[')) => {
@@ -672,7 +674,7 @@ fn nesting(text: &str, quotes: bool) -> usize {
                     index += 1;
                 }
             }
-            byte @ (b'(' | b'{' | b'[') if !quoted => {
+            byte @ (b'(' | b'{' | b'[') if quotes && !quoted => {
                 open.push(closing_bracket(byte));
                 depth += 1;
             }
@@ -1949,7 +1951,9 @@ mod tests {
             super::nesting("a[(1+(2))] ${x:-$(y)} \"((\" '((('", true),
             3
         );
-        assert_eq!(super::nesting("'((('", false), 3);
+        assert_eq!(super::nesting("'((('", false), 0);
+        assert_eq!(super::nesting("$(a '(((' \"[\") ${b}", false), 1);
+        assert_eq!(super::nesting(&"print(\"[\") $x\n".repeat(200), false), 0);
         assert_eq!(super::nesting(&"${a} (b) ".repeat(500), true), 1);
         let deep = format!("a[{}1{}]", "(".repeat(10000), ")".repeat(10000));
         assert!(matches!(
