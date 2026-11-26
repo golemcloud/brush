@@ -113,7 +113,14 @@ peg::parser! {
                 ast::ArithmeticTarget::Variable(name.to_owned())
             }
 
-        rule subscript() = ([^ '[' | ']'] / "[" subscript() "]")*
+        // The text up to the `]` that closes the subscript, with its brackets balanced; read in a
+        // loop, so deeply nested brackets cannot exhaust the stack.
+        rule subscript() = #{|input, pos| {
+            match input.get(pos..).and_then(subscript_len) {
+                Some(len) => peg::RuleResult::Matched(pos + len, ()),
+                None => peg::RuleResult::Failed,
+            }
+        }}
 
         rule variable_name() -> &'input str =
             $(['a'..='z' | 'A'..='Z' | '_'](['a'..='z' | 'A'..='Z' | '_' | '0'..='9']*))
@@ -140,6 +147,21 @@ peg::parser! {
 }
 
 /// The value of a literal's digits (all valid in the radix), wrapped to 64 bits.
+/// The length of the subscript text that starts `text`: up to its first `]` outside nested
+/// brackets, or `None` when no `]` closes it.
+fn subscript_len(text: &str) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'[' => depth += 1,
+            b']' if depth == 0 => return Some(index),
+            b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn wrapping_literal(digits: &str, radix: u32) -> i64 {
     digits
         .chars()

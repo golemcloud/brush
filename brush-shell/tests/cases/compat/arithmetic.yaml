@@ -360,3 +360,10 @@ cases:
       (( ref += 5 ))
       echo "after +=5: $counter"
       echo "expr: $(( ref * 2 ))"
+
+  - name: "Arithmetic reference with a deeply nested unclosed subscript"
+    ignore_stderr: true
+    stdin: |
+      y="a[$(printf '[%.0s' {1..20000})"
+      echo $((y))
+      echo "after $?"
