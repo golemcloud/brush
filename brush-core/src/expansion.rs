@@ -387,8 +387,9 @@ impl WordField {
 }
 
 impl From<WordField> for String {
+    /// The field's text; bytes in separate pieces that together make a character become it.
     fn from(field: WordField) -> Self {
-        field.0.into_iter().map(Self::from).collect()
+        crate::rawbytes::normalize(field.0.into_iter().map(Self::from).collect())
     }
 }
 
@@ -906,7 +907,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
                 joined.push_str(piece.as_str());
             }
         }
-        Ok(joined)
+        Ok(crate::rawbytes::normalize(joined))
     }
 
     async fn basic_expand_opt_pattern(

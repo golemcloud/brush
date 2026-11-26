@@ -75,3 +75,18 @@ cases:
       echo "%% /*: ${ref%%/*}"
       echo "# */: ${ref#*/}"
       echo "% /*: ${ref%/*}"
+
+  - name: "Bytes joined into a character are that character"
+    env:
+      LC_ALL: "C.UTF-8"
+    stdin: |
+      a=$'\xc3'; b=$'\xa9'
+      w=$a$b; echo ${#w}
+      [[ $w == é ]] && echo equal
+      case $w in é) echo case;; esac
+      declare -A m; m[$w]=1; echo "m=${m[é]}"
+      x="$a""$b"; echo ${#x}
+      v=$a; v+=$b; echo ${#v}
+      arr=($a); arr[0]+=$b; echo ${#arr[0]}
+      declare -A m2; m2[k]=$a; m2[k]+=$b; echo ${#m2[k]}
+      s=("$a" "$b"); IFS=; j="${s[*]}"; echo ${#j}
