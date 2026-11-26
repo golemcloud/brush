@@ -1433,7 +1433,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             //
             // If the character *can* start an operator, then it will.
             //
-            } else if state.unquoted() && Self::can_start_operator(c) {
+            } else if state.unquoted() && can_start_operator(c) {
                 // `NAME=(` (or `NAME+=(`) opens a compound array assignment, and its `)` closes
                 // it.
                 if c == '(' && state.started_token() {
@@ -1796,10 +1796,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         matches!(c, '@' | '!' | '?' | '+' | '*')
     }
 
-    const fn can_start_operator(c: char) -> bool {
-        matches!(c, '&' | '(' | ')' | ';' | '\n' | '|' | '<' | '>')
-    }
-
     fn is_operator(&self, s: &str) -> bool {
         // Handle non-POSIX operators.
         if !self.options.sh_mode && matches!(s, "<<<" | "&>" | "&>>" | ";;&" | ";&" | "|&") {
@@ -1842,6 +1838,11 @@ impl<R: ?Sized + std::io::BufRead> Iterator for Tokenizer<'_, R> {
             Err(e) => Some(Err(e)),
         }
     }
+}
+
+/// Whether `c` starts an operator outside quotes.
+pub(crate) const fn can_start_operator(c: char) -> bool {
+    matches!(c, '&' | '(' | ')' | ';' | '\n' | '|' | '<' | '>')
 }
 
 pub(crate) const fn is_blank(c: char) -> bool {

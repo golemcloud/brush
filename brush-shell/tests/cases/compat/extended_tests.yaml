@@ -696,3 +696,18 @@ cases:
       [[ $'1 #a\nb cd' =~ "$(echo ${x/1/1 #\'a
       b\'} 'c\
       d')" ]] && echo m2 || echo n2
+
+  - name: "Regex with a line continuation after a comment that follows an operator in a substitution"
+    stdin: |
+      [[ ab =~ "$( (# it's
+      printf %s 'a\
+      b'))" ]] && echo m1 || echo n1
+      [[ ab =~ "$( (:)# it's
+      printf %s 'a\
+      b')" ]] && echo m2 || echo n2
+      [[ $'a#b\nc de' =~ "$(echo $(echo a)#'b
+      c' 'd\
+      e')" ]] && echo m3 || echo n3
+      [[ $'1#b\nc de' =~ "$(echo $((1))#'b
+      c' 'd\
+      e')" ]] && echo m4 || echo n4

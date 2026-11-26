@@ -983,7 +983,7 @@ fn push_without_line_continuations(
         }
         result.push(c);
         comment_may_start =
-            commands && (crate::tokenizer::is_blank(c) || matches!(c, '\n' | ';' | '&' | '|'));
+            commands && (crate::tokenizer::is_blank(c) || crate::tokenizer::can_start_operator(c));
     }
 }
 
