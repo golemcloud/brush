@@ -27,6 +27,7 @@ pub(crate) struct FrameGuard<'a, SE: crate::extensions::ShellExtensions> {
     shell: &'a mut crate::Shell<SE>,
     cleanup: Option<FrameCleanup<SE>>,
     restore_status: Option<u8>,
+    restore_pipeline_statuses: Option<Vec<u8>>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -40,7 +41,14 @@ impl<'a, SE: crate::extensions::ShellExtensions> FrameGuard<'a, SE> {
             shell,
             cleanup: Some(cleanup),
             restore_status,
+            restore_pipeline_statuses: None,
         }
+    }
+
+    /// Has the frame put back these statuses of the last pipeline (`PIPESTATUS`) when it ends.
+    pub(crate) fn restoring_pipeline_statuses(mut self, statuses: Vec<u8>) -> Self {
+        self.restore_pipeline_statuses = Some(statuses);
+        self
     }
 
     pub(crate) const fn shell(&mut self) -> &mut crate::Shell<SE> {
@@ -58,6 +66,9 @@ impl<'a, SE: crate::extensions::ShellExtensions> FrameGuard<'a, SE> {
             .map_or(Ok(()), |cleanup| cleanup(self.shell));
         if let Some(status) = self.restore_status.take() {
             self.shell.last_exit_status = status;
+        }
+        if let Some(statuses) = self.restore_pipeline_statuses.take() {
+            self.shell.last_pipeline_statuses = statuses;
         }
         result
     }

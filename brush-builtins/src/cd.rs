@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use brush_core::{ExecutionResult, builtins, error};
+use brush_core::{ExecutionResult, builtins, error, rawbytes};
 
 /// Change the current shell working directory.
 #[derive(Parser)]
@@ -68,7 +68,7 @@ impl builtins::Command for CdCommand {
                         writeln!(context.stdout())?;
                         return Ok(ExecutionResult::success());
                     }
-                    Some(oldpwd) => PathBuf::from(oldpwd),
+                    Some(oldpwd) => rawbytes::to_path(&oldpwd),
                     None => {
                         context.report("OLDPWD not set")?;
                         return Ok(ExecutionResult::general_error());
@@ -87,12 +87,12 @@ impl builtins::Command for CdCommand {
                 should_print = true;
                 dir
             } else {
-                PathBuf::from(target_dir)
+                rawbytes::to_path(target_dir)
             }
         // `cd' without arguments is equivalent to `cd $HOME'
         } else {
             if let Some(home_var) = context.shell.env_str("HOME") {
-                PathBuf::from(home_var.to_string())
+                rawbytes::to_path(&home_var)
             } else {
                 context.report("HOME not set")?;
                 return Ok(ExecutionResult::general_error());
@@ -168,11 +168,16 @@ fn cdable_variable(
     context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
     target: &str,
 ) -> Option<PathBuf> {
-    if !context.shell.options().cdable_vars || context.shell.absolute_path(target).is_dir() {
+    if !context.shell.options().cdable_vars
+        || context
+            .shell
+            .absolute_path(rawbytes::to_path(target))
+            .is_dir()
+    {
         return None;
     }
     let value = context.shell.env_str(target)?;
-    let dir = PathBuf::from(value.as_ref());
+    let dir = rawbytes::to_path(&value);
     context.shell.absolute_path(&dir).is_dir().then_some(dir)
 }
 
@@ -190,9 +195,9 @@ fn cdpath_directory(
     let cdpath = context.shell.env_str("CDPATH")?;
     cdpath.split(':').find_map(|entry| {
         let candidate = if entry.is_empty() {
-            PathBuf::from(target)
+            rawbytes::to_path(target)
         } else {
-            PathBuf::from(entry).join(target)
+            rawbytes::to_path(entry).join(rawbytes::to_path(target))
         };
         context
             .shell

@@ -251,6 +251,17 @@ cases:
       EOF
       )
 
+  - name: "Here doc with escaped backslash and quotes in delimiters inside command substitution"
+    stdin: |
+      echo "$(cat <<E\\F
+      )
+      E\F
+      )"
+      echo "$(cat <<'A"B'
+      )
+      A"B
+      )"
+
   - name: "Here doc with unpaired single quote in command substitution"
     stdin: |
       echo "$(cat <<'EOF'
@@ -281,3 +292,9 @@ cases:
       EOF
       )
       echo $var
+
+  - name: "Here-document with many unclosed brackets in its text"
+    stdin: |
+      x=1
+      { echo 'cat <<EOF'; echo 'x=$x'; printf 'print("[")\n%.0s' {1..70}; printf 'f(${x}\n%.0s' {1..70}; echo '$(echo "[")'; echo 'EOF'; } > script.sh
+      . ./script.sh | sort | uniq -c

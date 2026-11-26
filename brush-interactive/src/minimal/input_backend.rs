@@ -75,12 +75,13 @@ impl MinimalInputBackend {
 
     /// Reads a single line, returning `None` at end of input.
     fn read_input_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, ShellError> {
-        let mut input = String::new();
+        // Input is bytes, kept as the shell keeps bytes that are not UTF-8.
+        let mut input = Vec::new();
         let bytes_read = reader
-            .read_line(&mut input)
+            .read_until(b'\n', &mut input)
             .map_err(ShellError::InputError)?;
 
-        Ok((bytes_read > 0).then_some(input))
+        Ok((bytes_read > 0).then(|| brush_core::rawbytes::decode_vec(input)))
     }
 }
 

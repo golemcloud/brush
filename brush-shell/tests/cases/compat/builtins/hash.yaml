@@ -147,3 +147,8 @@ cases:
       prog
       prog
       hash | scrub; echo "rc=${PIPESTATUS[0]}"
+
+  - name: "hash lists a path with raw bytes"
+    stdin: |
+      hash -p /x/a$'\xff' n
+      hash | od -An -tx1

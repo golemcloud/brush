@@ -44,34 +44,35 @@ fn needs_more_input_locked(shell: &Shell<impl brush_core::ShellExtensions>, inpu
         // A bad token at a specific position stays bad no matter what follows it.
         Err(_) => false,
         // Parsed cleanly. One catch: a trailing backslash-newline is a line
-        // continuation, which the tokenizer drops silently at end of input. Ask again
-        // with the newline removed; the tokenizer reports an unterminated escape only
-        // if that backslash was really escaping something.
+        // continuation, which the tokenizer drops silently at end of input, and a
+        // backslash that ends the input is read as an ordinary character.
         Ok(_) => ends_with_line_continuation(shell, input),
     }
 }
 
-/// Returns whether the given input ends with a backslash-newline acting as a line
-/// continuation.
+/// Returns whether the given input ends with a backslash, or a backslash-newline, acting as
+/// a line continuation: one that ends the input's last word and that no other backslash
+/// escapes. A backslash in a comment or in single quotes is not in a word that ends with it.
 fn ends_with_line_continuation(
     shell: &Shell<impl brush_core::ShellExtensions>,
     input: &str,
 ) -> bool {
-    let Some(truncated) = input.strip_suffix('\n') else {
-        return false;
-    };
+    let truncated = input.strip_suffix('\n').unwrap_or(input);
 
-    // Keeps the extra parse off the common path.
+    // Keeps the extra tokenizing off the common path.
     if !truncated.ends_with('\\') {
         return false;
     }
 
+    let options = shell.parser_options().tokenizer_options();
+    let Ok(tokens) = brush_parser::tokenize_str_with_options(truncated, &options) else {
+        return false;
+    };
     matches!(
-        shell.parse_string(truncated),
-        Err(brush_parser::ParseError::Tokenizing {
-            inner: brush_parser::TokenizerError::UnterminatedEscapeSequence,
-            position: _,
-        })
+        tokens.last(),
+        Some(brush_parser::Token::Word(word, location))
+            if location.end.index == truncated.chars().count()
+                && (word.len() - word.trim_end_matches('\\').len()) % 2 == 1
     )
 }
 
@@ -92,6 +93,10 @@ mod tests {
         assert!(needs_more_input_locked(&shell, "echo \"quoted\" \\\n"));
         // A backslash at the very end, with no newline yet.
         assert!(needs_more_input_locked(&shell, "echo a\\"));
+        // An escaped backslash, then a continuation.
+        assert!(needs_more_input_locked(&shell, "echo a\\\\\\\n"));
+        assert!(needs_more_input_locked(&shell, "echo a; \\\n"));
+        assert!(needs_more_input_locked(&shell, "echo 'a\\'\\\n"));
     }
 
     #[tokio::test]

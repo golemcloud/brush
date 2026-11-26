@@ -4634,7 +4634,8 @@ impl ExecutionParameters {
 /// `exec` made these substitutions' sinks descriptors of the shell itself: what writes to them
 /// is the rest of the shell. Each such list starts now, as a process alongside the shell reading
 /// through a pipe what is written, as bash's does, and ends once every descriptor writing to it
-/// is closed. Like a background job, it runs in the session's job scope.
+/// is closed. Like a background job, it runs in the session's job scope, or in the shell's own
+/// scope when the embedder made none.
 #[cfg(target_arch = "wasm32")]
 fn start_persistent_output_substitutions(
     shell: &mut Shell<impl extensions::ShellExtensions>,
@@ -4682,19 +4683,16 @@ fn start_persistent_output_substitutions(
         subshell.traps_mut().reset_exit_for_subshell();
         subshell.loop_depth = 0;
         let list = substitution.list;
-        drop(process::spawn_job(
-            &shell.execution_services(),
-            &table,
-            async move {
-                numbered
-                    .run(async {
-                        subshell.no_fork = NoFork::for_last_command(&list, true);
-                        let result = list.execute(&mut subshell, &params).await;
-                        subshell.exit_with_trap_in(result, &params).await
-                    })
-                    .await
-            },
-        ));
+        process::spawn_job(&shell.execution_services(), &table, async move {
+            numbered
+                .run(async {
+                    subshell.no_fork = NoFork::for_last_command(&list, true);
+                    let result = list.execute(&mut subshell, &params).await;
+                    subshell.exit_with_trap_in(result, &params).await
+                })
+                .await
+        })
+        .detach();
     }
 }
 

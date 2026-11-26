@@ -147,9 +147,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         let mut params = params.clone();
         params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
-        // Preserve $? across trap handler execution so the handler doesn't
+        // Preserve $? and PIPESTATUS across trap handler execution so the handler doesn't
         // clobber the status that triggered it.
         let orig_last_exit_status = self.last_exit_status;
+        let orig_pipeline_statuses = self.last_pipeline_statuses.clone();
 
         // Bash reads the handler with a parser of its own, one xtrace level deeper; the EXIT
         // trap runs one level below where its subshell started (at PS4's own for the shell).
@@ -170,7 +171,8 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                     Ok(())
                 },
                 Some(orig_last_exit_status),
-            );
+            )
+            .restoring_pipeline_statuses(orig_pipeline_statuses);
             frame
                 .shell()
                 .run_string(&handler.command, &handler.source_info, &params)
@@ -183,6 +185,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
                 .await;
             self.leave_trap_handler();
             self.last_exit_status = orig_last_exit_status;
+            self.last_pipeline_statuses = orig_pipeline_statuses;
             result
         };
         self.trace_level = trace_level;
@@ -209,6 +212,31 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 #[cfg(test)]
 mod tests {
     use crate::{ExecutionResult, Shell, builtins, execution::process, traps::PipeDisposition};
+
+    #[test]
+    fn trap_action_keeps_pipeline_statuses() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tokio::task::LocalSet::new().run_until(async {
+                let mut shell: Shell = Shell::new(crate::CreateOptions::default()).unwrap();
+                // Compound commands, as the shell has no builtins here.
+                shell.traps_mut().register_handler(
+                    "ERR".parse().unwrap(),
+                    "ran=1; ((1)) | ((1)) | ((1))".to_owned(),
+                    "test".into(),
+                );
+                let params = shell.default_exec_params();
+                shell
+                    .run_string("((0)) | ((0))", &"test".into(), &params)
+                    .await
+                    .unwrap();
+                assert_eq!(shell.env_str("ran").as_deref(), Some("1"));
+                assert_eq!(shell.last_pipeline_statuses(), [1, 1]);
+                assert_eq!(shell.last_exit_status(), 1);
+            }));
+    }
 
     #[test]
     fn terminating_pipe_handler_releases_frame_before_shell_reuse() {

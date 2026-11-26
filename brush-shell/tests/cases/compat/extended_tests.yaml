@@ -613,3 +613,110 @@ cases:
       t=$' \t\nabc \t\n'
       re=$'[ \t\n]+$'
       [[ $t =~ $re ]] && printf '[%s]\n' "${t::${#t}-${#BASH_REMATCH}}"
+
+  - name: "Regex back-reference captures keep raw bytes"
+    stdin: |
+      v=$'\xff\xff'
+      re='^(.)\1$'
+      [[ $v =~ $re ]] && echo matched
+      [[ ${BASH_REMATCH[0]} == "$v" ]] && echo "whole match"
+      [[ ${BASH_REMATCH[1]} == $'\xff' ]] && echo "group"
+      env printf '%s' "${BASH_REMATCH[@]}" | od -An -tx1
+
+  - name: "Regex with a line continuation"
+    stdin: |
+      [[ ab =~ a\
+      b ]] && echo m
+      [[ ab =~ "a\
+      b" ]] && echo dq
+      v=$(printf 'a\\\nb')
+      [[ $v =~ 'a\
+      b' ]] && echo sq
+      [[ $v =~ a\\\
+      b ]] && echo escaped
+      f() { [[ ab =~ a\
+      b ]]; }
+      declare -f f
+
+  - name: "Regex with a line continuation in a nested substitution"
+    stdin: |
+      [[ ab =~ "$(printf %s 'a\
+      b')" ]] && echo m1 || echo n1
+      v=$(printf 'a\\\nb')
+      [[ $v =~ "$(printf %s 'a\
+      b')" ]] && echo m2 || echo n2
+      [[ ab =~ $(echo "a\
+      b") ]] && echo m3 || echo n3
+      [[ ab =~ `echo 'a\
+      b'` ]] && echo m4 || echo n4
+      (( y = $(echo "1 +\
+      2") )); echo "y=$y"
+      f() { [[ ab =~ "$(printf %s 'a\
+      b')" ]]; }
+      declare -f f
+
+  - name: "Regex with a line continuation after a case or a comment in a substitution"
+    stdin: |
+      [[ ab =~ "$(case x in x) printf %s 'a\
+      b';; esac)" ]] && echo m1 || echo n1
+      [[ xab =~ "$(echo x # don't
+      )"a\
+      b ]] && echo m2 || echo n2
+      [[ ab =~ "$(echo "a\
+      b")" ]] && echo m3 || echo n3
+      (( z = $(echo 1 +\
+      2) + $((1 +\
+      1)) )); echo "z=$z"
+
+  - name: "Regex with a line continuation after a quote in a comment in a substitution"
+    stdin: |
+      [[ ab =~ "$(: x # it's
+      printf %s 'a\
+      b')" ]] && echo m1 || echo n1
+      [[ ab =~ "$(:;# it's
+      printf %s 'a\
+      b')" ]] && echo m2 || echo n2
+
+  - name: "Regex with a line continuation after quotes in an arithmetic expansion"
+    stdin: |
+      [[ ab =~ "${y:+$(( "1'" ))}"a\
+      b ]] && echo ok1 || echo no1
+      [[ ab =~ "${y:+$(( ("1'") ))}"a\
+      b ]] && echo ok2 || echo no2
+      y=1
+      [[ 3ab =~ "$(( (y) + "${y:+2}" ))"a\
+      b ]] && echo ok3 || echo no3
+
+  - name: "Regex with a line continuation after a parameter expansion in a substitution"
+    stdin: |
+      [[ $'#a\nb cd' =~ "$(echo ${y:- #'a
+      b'} 'c\
+      d')" ]] && echo m1 || echo n1
+      x=1
+      [[ $'1 #a\nb cd' =~ "$(echo ${x/1/1 #\'a
+      b\'} 'c\
+      d')" ]] && echo m2 || echo n2
+
+  - name: "Regex with a line continuation after a comment that follows an operator in a substitution"
+    stdin: |
+      [[ ab =~ "$( (# it's
+      printf %s 'a\
+      b'))" ]] && echo m1 || echo n1
+      [[ ab =~ "$( (:)# it's
+      printf %s 'a\
+      b')" ]] && echo m2 || echo n2
+      [[ $'a#b\nc de' =~ "$(echo $(echo a)#'b
+      c' 'd\
+      e')" ]] && echo m3 || echo n3
+      [[ $'1#b\nc de' =~ "$(echo $((1))#'b
+      c' 'd\
+      e')" ]] && echo m4 || echo n4
+      [[ de =~ "$(: x<(true)#'b
+      c'; printf %s 'd\
+      e')" ]] && echo m5 || echo n5
+      [[ de =~ "$(: x>(cat)#'b
+      c'; printf %s 'd\
+      e')" ]] && echo m6 || echo n6
+      [[ de =~ "$(: x<(echo "#'")#'b
+      c'; printf %s 'd\
+      e')" ]] && echo m7 || echo n7

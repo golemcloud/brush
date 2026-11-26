@@ -183,3 +183,9 @@ cases:
       }
       f
       echo "Exit code: $?"
+
+  - name: "Case pattern with an unclosed bracket after a terminator"
+    stdin: |
+      case x in a) ;; b[) echo no;; x) echo yes;; esac
+      case x in a) echo a;; b[) echo no;; x) echo yes;; esac
+      case "b[" in a) ;& b[) echo matched;; esac

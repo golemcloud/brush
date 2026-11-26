@@ -155,7 +155,10 @@ pub fn run() {
     //
     // Parse args.
     //
-    let mut args: Vec<_> = std::env::args().collect();
+    // Arguments are byte strings, kept as the shell keeps bytes (see `brush_core::rawbytes`).
+    let mut args: Vec<_> = std::env::args_os()
+        .map(|arg| brush_core::rawbytes::from_os_str(&arg).into_owned())
+        .collect();
 
     // Work around clap's limitations handling +O options.
     for arg in &mut args {
@@ -379,7 +382,7 @@ async fn run_in_shell(
             .lock()
             .await
             .run_script(
-                Path::new(&args.script_args[0]),
+                &brush_core::rawbytes::to_path(&args.script_args[0]),
                 args.script_args.iter().skip(1),
             )
             .await?;

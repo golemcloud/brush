@@ -158,18 +158,21 @@ pub(crate) fn describe(
     name: &str,
     resolved: &Resolved<'_>,
 ) -> std::io::Result<()> {
-    match resolved {
-        Resolved::Alias(target) => writeln!(writer, "{name} is aliased to `{target}'"),
-        Resolved::Keyword => writeln!(writer, "{name} is a shell keyword"),
-        Resolved::Function(def) => writeln!(writer, "{name} is a function\n{def}"),
-        Resolved::Builtin => writeln!(writer, "{name} is a shell builtin"),
+    let line = match resolved {
+        Resolved::Alias(target) => format!("{name} is aliased to `{target}'"),
+        Resolved::Keyword => format!("{name} is a shell keyword"),
+        Resolved::Function(def) => format!("{name} is a function\n{def}"),
+        Resolved::Builtin => format!("{name} is a shell builtin"),
         Resolved::File { path, hashed } => {
-            let path = path.to_string_lossy();
+            let path = brush_core::rawbytes::from_os_str(path.as_os_str());
             if *hashed {
-                writeln!(writer, "{name} is hashed ({path})")
+                format!("{name} is hashed ({path})")
             } else {
-                writeln!(writer, "{name} is {path}")
+                format!("{name} is {path}")
             }
         }
-    }
+    };
+    // A name or path holds the bytes it stands for (see `brush_core::rawbytes`).
+    writer.write_all(&brush_core::rawbytes::encode(&line))?;
+    writeln!(writer)
 }

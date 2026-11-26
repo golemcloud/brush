@@ -646,7 +646,8 @@ fn check_nesting(text: &str, quotes: bool) -> Result<(), error::WordParseError> 
 
 /// The deepest nesting of brackets and substitutions in `text`, found in one pass without
 /// recursing: `$(`, `${` and `$[` count everywhere, other brackets outside double quotes. With
-/// `quotes`, single-quoted text is skipped; otherwise (a here-document body) quotes are text.
+/// `quotes`, single-quoted text is skipped; otherwise (a here-document body or arithmetic text)
+/// quotes and other brackets are text until a `$(`, `${` or `$[` opens.
 fn nesting(text: &str, quotes: bool) -> usize {
     let bytes = text.as_bytes();
     // The closing bracket each open level waits for; `"` marks double quotes, which do not nest.
@@ -655,6 +656,7 @@ fn nesting(text: &str, quotes: bool) -> usize {
     let mut index = 0;
     while index < bytes.len() {
         let quoted = open.last() == Some(&b'"');
+        let quotes = quotes || !open.is_empty();
         match bytes[index] {
             b'\\' => index += 1,
             b'$' if matches!(bytes.get(index + 1), Some(b'(' | b'{' | b'[')) => {
@@ -672,7 +674,7 @@ fn nesting(text: &str, quotes: bool) -> usize {
                     index += 1;
                 }
             }
-            byte @ (b'(' | b'{' | b'[') if !quoted => {
+            byte @ (b'(' | b'{' | b'[') if quotes && !quoted => {
                 open.push(closing_bracket(byte));
                 depth += 1;
             }
@@ -686,6 +688,45 @@ fn nesting(text: &str, quotes: bool) -> usize {
         index += 1;
     }
     deepest
+}
+
+/// Whether a command starts after `before`, the text of a substitution's command read so far:
+/// at its start, after a control operator, a subshell's `(` or a case pattern's `)`, or after a
+/// reserved word that a command follows. After `;;`, `;&` or `;;&` a case pattern comes instead.
+fn starts_command(before: &str) -> bool {
+    let before = before.trim_end_matches([' ', '\t']);
+    match before.chars().next_back() {
+        None | Some('\n' | '|' | '(' | ')') => true,
+        Some(';') => !before.ends_with(";;"),
+        Some('&') => !before.ends_with(";&"),
+        Some(_) => {
+            // A reserved word is at most five bytes long, so only the end of the text is read.
+            let bytes = before.as_bytes();
+            let tail = &bytes[bytes.len().saturating_sub(6)..];
+            let word = match tail
+                .iter()
+                .rposition(|b| matches!(b, b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')'))
+            {
+                Some(separator) => &tail[separator + 1..],
+                None if tail.len() == bytes.len() => tail,
+                None => return before.ends_with("${"),
+            };
+            before.ends_with("${")
+                || matches!(
+                    word,
+                    b"then"
+                        | b"do"
+                        | b"else"
+                        | b"elif"
+                        | b"if"
+                        | b"while"
+                        | b"until"
+                        | b"{"
+                        | b"!"
+                        | b"time"
+                )
+        }
+    }
 }
 
 const fn closing_bracket(open: u8) -> u8 {
@@ -804,11 +845,7 @@ fn here_documents_len(text: &str) -> Option<usize> {
                 if tag.is_empty() {
                     return None;
                 }
-                let delimiter: String = tag
-                    .chars()
-                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-                    .collect();
-                delimiters.push((delimiter, strip));
+                delimiters.push((crate::tokenizer::unquote_str(tag), strip));
                 continue;
             }
             b'\\' => index += 1,
@@ -1656,7 +1693,7 @@ peg::parser! {
         // own and a `case` command is seen where it starts.
         pub(crate) rule command_piece() -> () =
             here_documents() {} /
-            case_command() {} /
+            &"case" command_start() case_command() {} /
             word_piece(<command_piece_stop()>, true /*in_command*/) {} /
             ([' ' | '\t' | '\n' | ';' | '&' | '|'])+ {} /
             ['\'' | '`'] {}
@@ -1664,19 +1701,30 @@ peg::parser! {
         rule command_piece_stop() -> () = [')' | ' ' | '\t' | '\n' | ';' | '&' | '|'] {}
 
         // A case command, whose patterns end in `)`, taken whole through its `esac` (bash reads
-        // a substitution as a command).
+        // a substitution as a command). Each start is tried once, so a run of `case` words that
+        // starts no command takes linear time.
+        #[cache]
         rule case_command() =
             "case" &keyword_end() (!("esac" keyword_end()) case_command_piece())* "esac" &keyword_end()
 
         rule case_command_piece() =
             here_documents() {} /
-            case_command() /
+            &"case" command_start() case_command() /
             word_piece(<case_command_stop()>, true /*in_command*/) {} /
             [_] {}
 
         rule case_command_stop() -> () = [')' | '(' | ' ' | '\t' | '\n' | ';' | '&' | '|'] {}
 
         rule keyword_end() = [' ' | '\t' | '\n' | ';' | ')' | '&' | '|'] / ![_]
+
+        // Where a command starts, so a reserved word there is one (see [`starts_command`]).
+        rule command_start() = #{|input, pos| {
+            if input.get(..pos).is_some_and(starts_command) {
+                peg::RuleResult::Matched(pos, ())
+            } else {
+                peg::RuleResult::Failed
+            }
+        }}
 
         // A here-document operator in a command's text, taken with the rest of its line and the
         // body of each here-document on that line, whose parentheses and quotes are text.
@@ -1691,7 +1739,7 @@ peg::parser! {
         // group or brace expression of its own.
         rule funsub_piece() =
             here_documents() {} /
-            case_command() /
+            &"case" command_start() case_command() /
             "{" (!"}" funsub_piece())* "}" {} /
             word_piece(<funsub_stop()>, true /*in_command*/) {} /
             [' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')'] {}
@@ -1919,7 +1967,9 @@ mod tests {
             super::nesting("a[(1+(2))] ${x:-$(y)} \"((\" '((('", true),
             3
         );
-        assert_eq!(super::nesting("'((('", false), 3);
+        assert_eq!(super::nesting("'((('", false), 0);
+        assert_eq!(super::nesting("$(a '(((' \"[\") ${b}", false), 1);
+        assert_eq!(super::nesting(&"print(\"[\") $x\n".repeat(200), false), 0);
         assert_eq!(super::nesting(&"${a} (b) ".repeat(500), true), 1);
         let deep = format!("a[{}1{}]", "(".repeat(10000), ")".repeat(10000));
         assert!(matches!(
@@ -1996,6 +2046,14 @@ mod tests {
             ),
             ("$(cat <<A | tr a b\n)(\nA\n)", "cat <<A | tr a b\n)(\nA\n"),
             ("$(cat <<<'(' )", "cat <<<'(' "),
+            // The delimiter is the tag with its quotes removed, as the shell removes them.
+            ("$(cat <<E\\\\F\nE\\F\n)", "cat <<E\\\\F\nE\\F\n"),
+            ("$(cat <<'A\"B'\n)\nA\"B\n)", "cat <<'A\"B'\n)\nA\"B\n"),
+            ("$(cat <<\"A'B\"\n)\nA'B\n)", "cat <<\"A'B\"\n)\nA'B\n"),
+            (
+                "$(cat <<\"A\\\\B\"\n)\nA\\B\n)",
+                "cat <<\"A\\\\B\"\n)\nA\\B\n",
+            ),
         ] {
             let pieces = super::parse(word, &ParserOptions::default())?;
             assert_matches!(

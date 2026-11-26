@@ -251,3 +251,32 @@ cases:
 
       $($(:))
       echo "exit code: $?"
+
+  - name: "Command substitution with many case words that start no command"
+    timeout_in_seconds: 10
+    stdin: |
+      x="$(echo case case case case case case case case case case case case case case case case case case case case case case case case)"
+      echo "$x"
+
+  - name: "Command substitution with a case word that starts no command"
+    stdin: |
+      echo "$(echo case) esac $(echo x)"
+      echo $(echo case)esac
+      echo "$(echo a; case b in b) case c in c) echo nested;; esac;; esac)"
+      echo $( if true; then case z in z) echo t;; esac; fi)
+
+  - name: "Command substitution with a case command after blanks"
+    stdin: |
+      x=$(  case a in a) echo s1;; esac); echo "$x"
+      x=$(echo a;  case a in a) echo s2;; esac); echo "$x"
+      x=$(
+        case a in a) echo s3;; esac
+      )
+      echo "$x"
+
+  - name: "Command substitution with many adjacent quoted fragments"
+    timeout_in_seconds: 10
+    stdin: |
+      q="''"; c="''case"
+      eval "x=\$(echo a$(printf "$q%.0s" {1..20000}))"; echo "${#x}"
+      eval "y=\$(echo a$(printf "$c%.0s" {1..10000}))"; echo "${#y}"

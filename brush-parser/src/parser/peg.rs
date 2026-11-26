@@ -2,7 +2,7 @@
 
 use crate::SourceSpan;
 use crate::ast::{self, SeparatorOperator, SourceLocation, maybe_location};
-use crate::tokenizer::Token;
+use crate::tokenizer::{ExpansionBody, Token};
 use crate::word;
 
 use super::{ParserOptions, Tokens};
@@ -873,16 +873,147 @@ fn negated(bangs: usize, expr: ast::ExtendedTestExpr) -> ast::ExtendedTestExpr {
     }
 }
 
+/// `text` without its line continuations: a backslash-newline that no other backslash escapes,
+/// outside single quotes, ANSI-C quotes and comments, as bash reads it. Backquotes take quotes
+/// as text.
+fn without_line_continuations(text: &str, options: &crate::TokenizerOptions) -> String {
+    if !text.contains("\\\n") {
+        return text.to_owned();
+    }
+    let mut result = String::with_capacity(text.len());
+    push_without_line_continuations(text, None, false, options, &mut result);
+    result
+}
+
+/// Pushes `text`, the body of an expansion that holds `body` (or the top text, for `None`),
+/// without its line continuations; `in_double` when it starts inside double quotes.
+///
+/// Each expansion that starts with `$` ends where the tokenizer ends it, and its body loses its
+/// own continuations: as in bash, a command substitution and an arithmetic expansion quote on
+/// their own even inside double quotes, and a `#` in a command starts a comment where the
+/// tokenizer starts one. Inside double quotes, a parameter expansion's body keeps the double
+/// quotes' rules, where bash removes a backslash-newline when it expands the body.
+fn push_without_line_continuations(
+    text: &str,
+    body: Option<ExpansionBody>,
+    in_double: bool,
+    options: &crate::TokenizerOptions,
+    result: &mut String,
+) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        Double,
+        Single,
+        AnsiC,
+        Backquote,
+    }
+
+    let commands = body == Some(ExpansionBody::Commands);
+    let mut quotes = if in_double {
+        vec![Quote::Double]
+    } else {
+        vec![]
+    };
+    let mut comment_may_start = commands;
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let quote = quotes.last().copied();
+        let expansion = if c == '$' && matches!(quote, None | Some(Quote::Double)) {
+            let in_arithmetic = body == Some(ExpansionBody::Arithmetic);
+            crate::tokenizer::dollar_expansion_extent(rest, in_arithmetic, options)
+                .ok()
+                .flatten()
+        } else if matches!(c, '<' | '>')
+            && quote.is_none()
+            && commands
+            && !comment_may_start
+            && !options.sh_mode
+            && rest.get(1..2) == Some("(")
+        {
+            // As the tokenizer reads it, `<(` or `>(` inside a word in a command starts a
+            // process substitution, read through its `)` as part of the word, like a command
+            // substitution.
+            crate::tokenizer::command_substitution_len(rest.get(2..).unwrap_or_default(), options)
+                .ok()
+                .map(|len| (ExpansionBody::Commands, 2, len + 2))
+        } else {
+            None
+        };
+        if let Some((inner, body_start, end)) = expansion
+            && let (Some(open), Some(inner_text), Some(close)) = (
+                rest.get(..body_start),
+                rest.get(body_start..end.saturating_sub(1)),
+                rest.get(end.saturating_sub(1)..end),
+            )
+        {
+            result.push_str(open);
+            let in_double = quote.is_some() && inner == ExpansionBody::Parameter;
+            push_without_line_continuations(inner_text, Some(inner), in_double, options, result);
+            result.push_str(close);
+            rest = rest.get(end..).unwrap_or_default();
+            comment_may_start = false;
+            continue;
+        }
+        rest = rest.get(c.len_utf8()..).unwrap_or_default();
+        match (quote, c) {
+            (Some(Quote::Single | Quote::AnsiC), '\'')
+            | (Some(Quote::Double), '"')
+            | (Some(Quote::Backquote), '`') => {
+                quotes.pop();
+            }
+            (Some(Quote::Single), _) => {}
+            (_, '\\') => {
+                if quote != Some(Quote::AnsiC)
+                    && let Some(after) = rest.strip_prefix('\n')
+                {
+                    rest = after;
+                    continue;
+                }
+                result.push(c);
+                if let Some(next) = rest.chars().next() {
+                    result.push(next);
+                    rest = rest.get(next.len_utf8()..).unwrap_or_default();
+                }
+                comment_may_start = false;
+                continue;
+            }
+            (Some(Quote::AnsiC | Quote::Backquote), _) => {}
+            (None | Some(Quote::Double), '`') => quotes.push(Quote::Backquote),
+            (None, '$') if rest.starts_with('\'') => {
+                result.push_str("$'");
+                rest = rest.get(1..).unwrap_or_default();
+                quotes.push(Quote::AnsiC);
+                continue;
+            }
+            (None, '\'') => quotes.push(Quote::Single),
+            (None, '"') => quotes.push(Quote::Double),
+            (None, '#') if comment_may_start => {
+                let comment = rest.find('\n').unwrap_or(rest.len());
+                result.push(c);
+                result.push_str(rest.get(..comment).unwrap_or_default());
+                rest = rest.get(comment..).unwrap_or_default();
+                continue;
+            }
+            _ => {}
+        }
+        result.push(c);
+        comment_may_start =
+            commands && (crate::tokenizer::is_blank(c) || crate::tokenizer::can_start_operator(c));
+    }
+}
+
 #[inline]
 fn locations_are_contiguous(loc_left: &crate::SourceSpan, loc_right: &crate::SourceSpan) -> bool {
     loc_left.end.index == loc_right.start.index
 }
 
 impl Tokens<'_> {
-    /// The source text from character `from` to character `to`, when the source is known.
+    /// The source text from character `from` to character `to`, when the source is known, with
+    /// each line continuation (an unquoted backslash-newline) removed, as bash reads it.
     fn source_text(&self, from: usize, to: usize) -> Option<String> {
         let source = self.source?;
-        (from <= to).then(|| source.chars().skip(from).take(to - from).collect())
+        let text = source.get(self.byte_offset(from)?..self.byte_offset(to)?)?;
+        Some(without_line_continuations(text, &self.options))
     }
 
     /// The source text after the token `from` and before the token `to`.

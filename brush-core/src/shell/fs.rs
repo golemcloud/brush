@@ -7,7 +7,7 @@ use normalize_path::NormalizePath as _;
 use crate::{
     ExecutionParameters, ShellFd,
     env::{EnvironmentLookup, EnvironmentScope},
-    error, openfiles, pathsearch,
+    error, openfiles, pathsearch, rawbytes,
     sys::users,
     variables,
 };
@@ -44,14 +44,16 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         }
 
         // Exactly two leading slashes are kept, as POSIX lets them mean something else.
-        let abs_str = abs_path.to_string_lossy();
-        let cleaned_path = if abs_str.starts_with("//") && !abs_str.starts_with("///") {
-            PathBuf::from(format!("/{}", cleaned_path.to_string_lossy()))
+        let abs_bytes = abs_path.as_os_str().as_encoded_bytes();
+        let cleaned_path = if abs_bytes.starts_with(b"//") && !abs_bytes.starts_with(b"///") {
+            let mut doubled = std::ffi::OsString::from("/");
+            doubled.push(cleaned_path.as_os_str());
+            PathBuf::from(doubled)
         } else {
             cleaned_path
         };
 
-        let pwd = cleaned_path.to_string_lossy().to_string();
+        let pwd = rawbytes::from_os_str(cleaned_path.as_os_str()).into_owned();
         let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);
 
         // The directory changes even when PWD or OLDPWD is readonly, as in bash, which then
@@ -65,7 +67,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         );
         let oldpwd_result = self.env.update_or_add(
             "OLDPWD",
-            variables::ShellValueLiteral::Scalar(oldpwd.to_string_lossy().to_string()),
+            variables::ShellValueLiteral::Scalar(
+                rawbytes::from_os_str(oldpwd.as_os_str()).into_owned(),
+            ),
             |_| Ok(()),
             EnvironmentLookup::Anywhere,
             EnvironmentScope::Global,
@@ -90,7 +94,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     /// Returns the shell's current home directory, if available.
     pub(crate) fn home_dir(&self) -> Option<PathBuf> {
         if let Some(home) = self.env.get_str("HOME", self) {
-            Some(PathBuf::from(home.to_string()))
+            Some(rawbytes::to_path(&home))
         } else {
             // HOME isn't set, so let's sort it out ourselves.
             users::get_current_user_home_dir()
@@ -107,10 +111,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         &'a self,
         filename: &'a str,
     ) -> impl Iterator<Item = PathBuf> + 'a {
-        let path_var = self.env.get_str("PATH", self).unwrap_or_default();
-        let paths = crate::sys::fs::split_paths(path_var.as_ref());
+        // The directories hold the bytes the value stands for (see `rawbytes`).
+        let path_var = rawbytes::to_os_string(&self.env.get_str("PATH", self).unwrap_or_default());
+        let paths = crate::sys::fs::split_paths(&path_var);
 
-        pathsearch::search_for_executable(paths, filename)
+        pathsearch::search_for_executable(paths, rawbytes::to_path(filename))
     }
 
     /// Finds executables in the shell's current default PATH, with filenames matching the
@@ -124,8 +129,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
         filename_prefix: &str,
         case_insensitive: bool,
     ) -> impl Iterator<Item = PathBuf> {
-        let path_var = self.env.get_str("PATH", self).unwrap_or_default();
-        let paths = crate::sys::fs::split_paths(path_var.as_ref());
+        // The directories hold the bytes the value stands for (see `rawbytes`).
+        let path_var = rawbytes::to_os_string(&self.env.get_str("PATH", self).unwrap_or_default());
+        let paths = crate::sys::fs::split_paths(&path_var);
 
         pathsearch::search_for_executable_with_prefix(paths, filename_prefix, case_insensitive)
     }
@@ -179,9 +185,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
     ///
     /// * `candidate_name` - The name of the command to resolve.
     pub fn resolve_command_in_path<S: AsRef<str>>(&self, candidate_name: S) -> Option<PathBuf> {
-        let path_var = self.env.get_str("PATH", self).unwrap_or_default();
-        let paths = crate::sys::fs::split_paths(path_var.as_ref());
-        pathsearch::resolve_command(paths, candidate_name.as_ref())
+        // The directories hold the bytes the value stands for (see `rawbytes`).
+        let path_var = rawbytes::to_os_string(&self.env.get_str("PATH", self).unwrap_or_default());
+        let paths = crate::sys::fs::split_paths(&path_var);
+        pathsearch::resolve_command(paths, rawbytes::to_path(candidate_name.as_ref()))
     }
 
     /// Like [`Self::resolve_command_in_path`], but consults the shell's hash-based path cache

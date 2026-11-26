@@ -175,7 +175,34 @@ struct Flags {
     invert: bool,
 }
 
+/// Drops a connection's commands from a work list rather than by recursion: a long list or
+/// pipeline is a long chain of connections.
+impl Drop for Command<'_> {
+    fn drop(&mut self) {
+        let mut connected = vec![];
+        self.take_connected(&mut connected);
+        while let Some(mut command) = connected.pop() {
+            command.take_connected(&mut connected);
+        }
+    }
+}
+
 impl Command<'_> {
+    /// Moves this connection's commands that are connections themselves to `connected`.
+    fn take_connected(&mut self, connected: &mut Vec<Self>) {
+        if let Self::Connection { first, second, .. } = self {
+            if matches!(**first, Self::Connection { .. }) {
+                connected.push(std::mem::replace(
+                    first.as_mut(),
+                    Self::Empty(Flags::default()),
+                ));
+            }
+            if matches!(second.as_deref(), Some(Self::Connection { .. })) {
+                connected.extend(second.take().map(|second| *second));
+            }
+        }
+    }
+
     const fn flags_mut(&mut self) -> Option<&mut Flags> {
         match self {
             Self::Connection { flags, .. }
@@ -223,21 +250,18 @@ fn connect<'a>(
 }
 
 /// Bash's `connect_async_list`: `a; b & c` runs `b` in the background, not `a; b`.
-fn connect_async<'a>(command: Command<'a>, next: Option<Command<'a>>) -> Command<'a> {
-    match command {
-        Command::Connection {
-            first,
-            connector: Connector::Semicolon,
-            second: Some(second),
-            flags,
-        } => Command::Connection {
-            first,
-            connector: Connector::Semicolon,
-            second: Some(Box::new(connect_async(*second, next))),
-            flags,
-        },
-        command => connect(command, Connector::Async, next),
+fn connect_async<'a>(mut command: Command<'a>, next: Option<Command<'a>>) -> Command<'a> {
+    if let Command::Connection {
+        connector: Connector::Semicolon,
+        second: Some(second),
+        ..
+    } = &mut command
+    {
+        let last = std::mem::replace(second.as_mut(), Command::Empty(Flags::default()));
+        **second = connect_async(last, next);
+        return command;
     }
+    connect(command, Connector::Async, next)
 }
 
 fn and_or_command(and_or: &ast::AndOrList) -> Command<'_> {
@@ -283,6 +307,16 @@ fn single_command(command: &ast::Command) -> Command<'_> {
         }
         ast::Command::Function(function) => Command::Function(function, Flags::default()),
     }
+}
+
+/// A step of [`Printer::command`]'s work list.
+enum Step<'c, 'a> {
+    /// Print a command.
+    Command(&'c Command<'a>),
+    /// Print a connection's connector, then its second command.
+    Connector(Connector, Option<&'c Command<'a>>),
+    /// End a connection.
+    ConnectionEnd,
 }
 
 /// A here-document whose body is still to be printed.
@@ -344,8 +378,31 @@ impl<'a> Printer<'a> {
         self.print(&text);
     }
 
-    /// Bash's `make_command_string_internal`.
+    /// Bash's `make_command_string_internal`. A connection's commands are printed from a work
+    /// list rather than by recursion: a long list or pipeline is a long chain of connections.
     fn command(&mut self, command: &Command<'a>) {
+        let mut steps = vec![Step::Command(command)];
+        while let Some(step) = steps.pop() {
+            match step {
+                Step::Command(command) => self.command_start(command, &mut steps),
+                Step::Connector(connector, second) => {
+                    self.connector(connector, second.is_some());
+                    if let Some(second) = second {
+                        steps.push(Step::Command(second));
+                    }
+                }
+                Step::ConnectionEnd => {
+                    if self.printing_connection == 1 {
+                        self.print_deferred_heredocs("");
+                    }
+                    self.printing_connection -= 1;
+                }
+            }
+        }
+    }
+
+    /// Prints `command`, or for a connection, adds its steps to `steps`.
+    fn command_start<'c>(&mut self, command: &'c Command<'a>, steps: &mut Vec<Step<'c, 'a>>) {
         if self.skip_this_indent > 0 {
             self.skip_this_indent -= 1;
         } else {
@@ -376,7 +433,13 @@ impl<'a> Printer<'a> {
                 connector,
                 second,
                 ..
-            } => self.connection(first, *connector, second.as_deref()),
+            } => {
+                self.skip_this_indent += 1;
+                self.printing_connection += 1;
+                steps.push(Step::ConnectionEnd);
+                steps.push(Step::Connector(*connector, second.as_deref()));
+                steps.push(Step::Command(first));
+            }
             Command::Simple(simple, _) => self.simple_command(simple),
             Command::Compound(compound, redirects, _) => {
                 self.compound_command(compound);
@@ -395,16 +458,8 @@ impl<'a> Printer<'a> {
         }
     }
 
-    fn connection(
-        &mut self,
-        first: &Command<'a>,
-        connector: Connector,
-        second: Option<&Command<'a>>,
-    ) {
-        self.skip_this_indent += 1;
-        self.printing_connection += 1;
-        self.command(first);
-
+    /// What a connection prints between its two commands.
+    fn connector(&mut self, connector: Connector, has_second: bool) {
         match connector {
             Connector::Async | Connector::Pipe => {
                 let text = if connector == Connector::Async {
@@ -413,7 +468,7 @@ impl<'a> Printer<'a> {
                     " |"
                 };
                 self.print_deferred_heredocs(text);
-                if connector != Connector::Async || second.is_some() {
+                if connector != Connector::Async || has_second {
                     self.print(" ");
                     self.skip_this_indent += 1;
                 }
@@ -424,7 +479,7 @@ impl<'a> Printer<'a> {
                 } else {
                     " || "
                 });
-                if second.is_some() {
+                if has_second {
                     self.skip_this_indent += 1;
                 }
             }
@@ -453,20 +508,12 @@ impl<'a> Printer<'a> {
                     if !newline {
                         self.print(" ");
                     }
-                    if second.is_some() {
+                    if has_second {
                         self.skip_this_indent += 1;
                     }
                 }
             }
         }
-
-        if let Some(second) = second {
-            self.command(second);
-        }
-        if self.printing_connection == 1 {
-            self.print_deferred_heredocs("");
-        }
-        self.printing_connection -= 1;
     }
 
     /// A command list inside a compound command.
@@ -1212,5 +1259,19 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn long_flat_lists_and_pipelines_are_printed_back() {
+        let options = crate::ParserOptions::default();
+        for connector in ["; ", "\n", " && ", " || ", " | "] {
+            let body = vec![":"; 50_000].join(connector);
+            let printed = reprint_comsub_text(&body, &options);
+            assert_eq!(
+                printed.as_deref(),
+                Some(body.as_str()),
+                "connector {connector:?}"
+            );
+        }
     }
 }

@@ -140,6 +140,16 @@ fn parse_extended_test_regex_with_spaces() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn parse_extended_test_regex_keeps_quoted_continuation_after_parameter_in_arithmetic() -> Result<()>
+{
+    // The tokenizer ends `${x:-(}` at its brace, so the `(` in it leaves `$((...))` closed.
+    let input = "[[ 1ab =~ \"$(( ${x:-(} ))\"'a\\\nb' ]]";
+    let program = super::parse_with_config(input, &super::parser_configs()[0])?;
+    anyhow::ensure!(program.to_string().contains("'a\\\nb'"), "{program}");
+    Ok(())
+}
+
 // Logical operators
 
 #[test]

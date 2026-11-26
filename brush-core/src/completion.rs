@@ -1304,7 +1304,13 @@ async fn get_file_completions(
 
     let glob = std::format!("{expanded_token}*");
 
-    let path_filter = |path: &Path| !must_be_dir || shell.absolute_path(path).is_dir();
+    // The filter sees each result as the shell string it is returned as.
+    let path_filter = |path: &Path| {
+        !must_be_dir
+            || shell
+                .absolute_path(crate::rawbytes::to_path(&path.to_string_lossy()))
+                .is_dir()
+    };
 
     let pattern = patterns::Pattern::from(glob)
         .set_extended_globbing(shell.options().extended_globbing)

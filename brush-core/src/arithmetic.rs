@@ -475,24 +475,6 @@ fn get_var_value<'a>(
     shell: &'a Shell<impl extensions::ShellExtensions>,
     name: &str,
 ) -> Result<Cow<'a, str>, EvalError> {
-    // A nameref to an array element (`declare -n ref='arr[1]'`) reads that element.
-    let target = shell.env().resolve_nameref(name);
-    if let Some((base, index)) = target
-        .strip_suffix(']')
-        .and_then(|target| target.split_once('['))
-    {
-        let element = shell.env().get(base).and_then(|(_, var)| {
-            var.value()
-                .get_at(index, shell)
-                .ok()
-                .flatten()
-                .map(|value| value.to_string())
-        });
-        if let Some(element) = element {
-            return Ok(element.into());
-        }
-    }
-
     let value = shell.env_var(name).map(|var| var.resolve_value(shell));
 
     if let Some(value) = value
@@ -519,7 +501,17 @@ fn deref_lvalue(
         ast::ArithmeticTarget::ArrayElement(name, _) => shell.note_circular_nameref(name, 2, false),
     }
     let value_str: Cow<'_, str> = match lvalue {
-        ast::ArithmeticTarget::Variable(name) => get_var_value(shell, name.as_str())?,
+        // A nameref to an array element (`declare -n ref='arr[i]'`) reads that element, with its
+        // subscript evaluated as any element's is.
+        ast::ArithmeticTarget::Variable(name) => {
+            match shell.env().resolve_nameref_element(name.as_str()) {
+                Some((base, index)) => match read_element(shell, &base, &index, depth)? {
+                    Some(element) => Cow::Owned(element),
+                    None => get_var_value(shell, name.as_str())?,
+                },
+                None => get_var_value(shell, name.as_str())?,
+            }
+        }
         ast::ArithmeticTarget::ArrayElement(name, index) => {
             read_element(shell, name, index, depth)?.map_or(Cow::Borrowed(""), Cow::Owned)
         }
@@ -708,6 +700,11 @@ fn assign(
     }
     match lvalue {
         ast::ArithmeticTarget::Variable(name) => {
+            // A nameref to an array element assigns that element, with its subscript evaluated
+            // as any element's is.
+            if let Some((base, index)) = shell.env().resolve_nameref_element(name.as_str()) {
+                return assign_element(shell, &base, &index, value, depth);
+            }
             shell
                 .env_mut()
                 .update_or_add(
@@ -718,37 +715,48 @@ fn assign(
                     env::EnvironmentScope::Global,
                 )
                 .map_err(|error| assignment_error(&error))?;
+            Ok(value)
         }
         ast::ArithmeticTarget::ArrayElement(name, index) => {
-            // Bash reports an element it cannot assign, and goes on.
-            if !is_associative(shell, name) && matches!(index.as_str(), "@" | "*") {
-                report(shell, &format!("{name}[{index}]: bad array subscript"));
-                return Ok(value);
-            }
-            let index_str = element_key(shell, name, index, depth)?;
-
-            let assigned = shell.env_mut().update_or_add_array_element(
-                name.as_str(),
-                index_str.clone(),
-                value.to_string(),
-                |_| Ok(()),
-                env::EnvironmentLookup::Anywhere,
-                env::EnvironmentScope::Global,
-            );
-            match assigned {
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        crate::error::ErrorKind::ArrayIndexOutOfRange(_)
-                    ) =>
-                {
-                    report(shell, &format!("{name}[{index_str}]: bad array subscript"));
-                }
-                assigned => assigned.map_err(|error| assignment_error(&error))?,
-            }
+            assign_element(shell, name, index, value, depth)
         }
     }
+}
 
+/// Assigns `value` to `name[index]`.
+fn assign_element(
+    shell: &mut Shell<impl extensions::ShellExtensions>,
+    name: &str,
+    index: &str,
+    value: i64,
+    depth: u32,
+) -> Result<i64, EvalError> {
+    // Bash reports an element it cannot assign, and goes on.
+    if !is_associative(shell, name) && matches!(index, "@" | "*") {
+        report(shell, &format!("{name}[{index}]: bad array subscript"));
+        return Ok(value);
+    }
+    let index_str = element_key(shell, name, index, depth)?;
+
+    let assigned = shell.env_mut().update_or_add_array_element(
+        name,
+        index_str.clone(),
+        value.to_string(),
+        |_| Ok(()),
+        env::EnvironmentLookup::Anywhere,
+        env::EnvironmentScope::Global,
+    );
+    match assigned {
+        Err(error)
+            if matches!(
+                error.kind(),
+                crate::error::ErrorKind::ArrayIndexOutOfRange(_)
+            ) =>
+        {
+            report(shell, &format!("{name}[{index_str}]: bad array subscript"));
+        }
+        assigned => assigned.map_err(|error| assignment_error(&error))?,
+    }
     Ok(value)
 }
 

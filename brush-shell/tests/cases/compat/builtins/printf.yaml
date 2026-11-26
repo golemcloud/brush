@@ -442,3 +442,14 @@ cases:
     stdin: |
       printf '<%#q>\n' 'foo'
       printf '<%#12q>\n' 'foo bar'
+
+  - name: "printf keeps raw bytes in arguments, the format and -v"
+    env:
+      LC_ALL: "C.UTF-8"
+    stdin: |
+      x=$'\xff'
+      printf '%s|%s\n' "$x" $'a\x80b' | od -An -tx1
+      printf "<$x>\n" | od -An -tx1
+      printf -v v '%s' "$x"; echo ${#v}
+      printf -v w '\xc3\xa9'; echo "${#w} $w"
+      printf -v z '\xff'; echo "${#z}"; echo "$z" | od -An -tx1

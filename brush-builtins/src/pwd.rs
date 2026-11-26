@@ -37,7 +37,10 @@ impl builtins::Command for PwdCommand {
             cwd = cwd.canonicalize()?.into();
         }
 
-        writeln!(context.stdout(), "{}", cwd.to_string_lossy())?;
+        // The path's own bytes, which need not be UTF-8.
+        let mut line = cwd.as_os_str().as_encoded_bytes().to_vec();
+        line.push(b'\n');
+        context.stdout().write_all(&line)?;
 
         Ok(ExecutionResult::success())
     }

@@ -148,6 +148,39 @@ pub fn to_os_string(text: &str) -> std::ffi::OsString {
     }
 }
 
+/// Converts a shell string to the path it names, holding the bytes it stands for.
+///
+/// # Arguments
+///
+/// * `text` - The string to convert.
+pub fn to_path(text: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(to_os_string(text))
+}
+
+/// Converts an OS string, such as a file name, to a shell string, keeping each byte that is not
+/// part of valid UTF-8.
+///
+/// # Arguments
+///
+/// * `text` - The OS string to convert.
+pub fn from_os_str(text: &std::ffi::OsStr) -> Cow<'_, str> {
+    decode(text.as_encoded_bytes())
+}
+
+/// Returns a shell string built by joining others in the form [`decode`] gives it: bytes that
+/// together make valid UTF-8 (`$'\xc3'` then `$'\xa9'`) become the character they encode.
+///
+/// # Arguments
+///
+/// * `text` - The string to normalize.
+pub fn normalize(text: String) -> String {
+    if !text.as_bytes().contains(&LEAD_BYTE) {
+        return text;
+    }
+    let normalized = decode_vec(encode(&text).into_owned());
+    if normalized == text { text } else { normalized }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +214,16 @@ mod tests {
         assert_eq!(decode(b"a\xffb").chars().count(), 3);
         assert_eq!(decode(b"caf\xe9").chars().count(), 4);
         assert_eq!(decode("\u{10FF80}".as_bytes()).chars().count(), 4);
+    }
+
+    #[test]
+    fn normalize_joins_bytes_into_characters() {
+        let joined = std::format!("{}{}", decode(b"\xc3"), decode(b"\xa9"));
+        assert_eq!(joined.chars().count(), 2);
+        assert_eq!(normalize(joined), "é");
+        let kept = decode(b"a\xff\xe9").into_owned();
+        assert_eq!(normalize(kept.clone()), kept);
+        assert_eq!(normalize("plain".to_owned()), "plain");
     }
 
     #[test]

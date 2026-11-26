@@ -162,15 +162,20 @@ const fn has_file_type(_path: &std::path::Path, _file_type: FileType) -> bool {
 /// Splits a PATH-like value into individual paths.
 ///
 /// On WASM, `std::env::split_paths` is not available, so this
-/// implementation splits by the `:` separator.
+/// implementation splits the value's bytes, which need not be UTF-8, by the `:` separator.
 pub fn split_paths<T: AsRef<std::ffi::OsStr> + ?Sized>(
     s: &T,
 ) -> impl Iterator<Item = std::path::PathBuf> {
     s.as_ref()
-        .to_str()
-        .unwrap_or_default()
-        .split(':')
-        .map(std::path::PathBuf::from)
+        .as_encoded_bytes()
+        .split(|byte| *byte == b':')
+        .map(|part| {
+            // SAFETY: the bytes come from `as_encoded_bytes`, split only at an ASCII `:`, which
+            // the documentation of `from_encoded_bytes_unchecked` allows.
+            std::path::PathBuf::from(unsafe {
+                std::ffi::OsString::from_encoded_bytes_unchecked(part.to_vec())
+            })
+        })
         .collect::<Vec<_>>()
         .into_iter()
 }

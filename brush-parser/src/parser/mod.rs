@@ -165,10 +165,7 @@ impl<R: std::io::BufRead> Parser<R> {
             ParserImpl::Peg => {
                 let (tokens, source) = self.tokenize()?;
                 let parse_result = peg::token_parser::program(
-                    &Tokens {
-                        tokens: &tokens,
-                        source: Some(&source),
-                    },
+                    &Tokens::new(&tokens, Some(&source), self.options.tokenizer_options()),
                     &self.options,
                 );
                 parse_result_to_error(parse_result, &tokens)
@@ -201,10 +198,7 @@ impl<R: std::io::BufRead> Parser<R> {
     ) -> Result<ast::FunctionBody, crate::error::ParseError> {
         let (tokens, source) = self.tokenize()?;
         let parse_result = peg::token_parser::function_parens_and_body(
-            &Tokens {
-                tokens: &tokens,
-                source: Some(&source),
-            },
+            &Tokens::new(&tokens, Some(&source), self.options.tokenizer_options()),
             &self.options,
         );
         parse_result_to_error(parse_result, &tokens)
@@ -257,10 +251,7 @@ pub fn parse_tokens(
     options: &ParserOptions,
 ) -> Result<ast::Program, crate::error::ParseError> {
     let parse_result = peg::token_parser::program(
-        &Tokens {
-            tokens,
-            source: None,
-        },
+        &Tokens::new(tokens, None, options.tokenizer_options()),
         options,
     );
     parse_result_to_error(parse_result, tokens)
@@ -279,10 +270,7 @@ pub(crate) fn parse_compound_assignment_value(
 ) -> Option<Vec<String>> {
     let mut parser = Parser::new(input.as_bytes(), options);
     let (tokens, source) = parser.tokenize().ok()?;
-    let tokens = Tokens {
-        tokens: &tokens,
-        source: Some(&source),
-    };
+    let tokens = Tokens::new(&tokens, Some(&source), options.tokenizer_options());
     let elements = peg::token_parser::compound_assignment_value(&tokens, options).ok()?;
     Some(elements.into_iter().cloned().collect())
 }

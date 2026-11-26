@@ -90,3 +90,68 @@ cases:
       # ...and the shell remembers it, even though it could not be run.
       hash -t only | sed "s|^$PWD/||"
       echo "Result: ${PIPESTATUS[0]}"
+
+  - name: "External command arguments and exported values keep raw bytes"
+    stdin: |
+      x=$'\xff'
+      env printf '%s|%s' "$x" $'a\x80b' | od -An -tx1
+      export Y=$'a\xfeb'
+      env | grep -a '^Y=' | od -An -tx1
+      (exec env printf '%s' "$x") | od -An -tx1
+
+  - name: "File names with raw bytes in tests, cd, source, lookup and hash"
+    stdin: |
+      # The harness compares the files left behind by name, so none is left.
+      trap 'cd /; rm -rf "$work"' EXIT
+      work=$PWD/work; mkdir "$work"; cd "$work"
+      n=$'\xff\xe9'
+      touch -d 2020-01-01 "f$n"; mkdir "d$n"; echo 'echo sourced' > "s$n"
+      touch -d 2021-01-01 "s$n"
+      printf '#!/bin/sh\necho ran\n' > "x$n"; chmod +x "x$n"
+      [[ -f f$n ]] && echo f
+      [[ -d d$n ]] && echo d
+      [ -e "f$n" ] && echo e
+      test -s "s$n" && echo s
+      [[ s$n -nt f$n ]] && echo nt
+      [[ f$n -ot s$n ]] && echo ot
+      [[ f$n -ef f$n ]] && echo ef
+      (cd "d$n" && pwd | od -An -tx1 | tr -d ' \n' | tail -c 8; echo)
+      . "./s$n"
+      "./x$n"
+      PATH=$PWD:$PATH
+      "x$n"
+      type "x$n" | sed "s|$PWD/||" | od -An -tx1
+      type -P "x$n" | sed "s|$PWD/||" | od -An -tx1
+      hash -p "./x$n" hx; hx
+      hash -t hx | od -An -tx1
+
+  - name: "Globs match and give file names with raw bytes"
+    stdin: |
+      # The harness compares the files left behind by name, so none is left.
+      trap 'cd /; rm -rf "$work"' EXIT
+      work=$PWD/work; mkdir "$work"; cd "$work"
+      n=$'\xff\xe9'
+      touch "f$n" "g$n"
+      for f in f*; do echo -n "$f" | od -An -tx1; done
+      echo *"$n" | od -An -tx1
+      echo [fg]"$n" | od -An -tx1
+      compgen -f f | od -An -tx1
+      [[ f$n == f* ]] && echo match
+
+  - name: "Scripts, arguments and the environment keep raw bytes"
+    stdin: |
+      printf 'echo "\xf4\x8f\xbe\x80"\n' > s1.sh
+      "$BASH" s1.sh | od -An -tx1
+      E2=$(printf '\xf4\x8f\xbe\x80') "$BASH" -c 'echo "$E2" | od -An -tx1'
+      E3=$(printf '\xffa') "$BASH" -c 'echo "$E3" | od -An -tx1; env | grep -a "^E3=" | od -An -tx1'
+      printf 'echo "$1" | od -An -tx1\n' > a.sh
+      "$BASH" a.sh $'\xff'
+      printf 'echo "x\xffy" | od -An -tx1\n' > b.sh
+      "$BASH" b.sh
+      "$BASH" -c $'echo "\xfe" | od -An -tx1'
+      "$BASH" -c 'echo "$0" | od -An -tx1' $'z\xfd'
+      printf 'echo "\xf4\x8f\xbe\x80"\necho "a\xffb"\n' | "$BASH" | od -An -tx1
+      # The harness compares the files left behind by name, so this one is removed.
+      printf 'echo "$0" | od -An -tx1\n' > s$'\xfe'.sh
+      "$BASH" s$'\xfe'.sh
+      rm s$'\xfe'.sh

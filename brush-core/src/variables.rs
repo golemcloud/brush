@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::fmt::{Display, Write};
 
 use crate::shell::{Shell, ShellState};
-use crate::{error, escape, extensions, memory};
+use crate::{error, escape, extensions, memory, rawbytes};
 
 /// A shell variable.
 #[derive(Clone, Debug)]
@@ -456,6 +456,7 @@ impl ShellVariable {
                             base.push_str(int_value.to_string().as_str());
                         } else {
                             base.push_str(suffix.as_str());
+                            *base = rawbytes::normalize(std::mem::take(base));
                             Self::apply_value_transforms(base, treat_as_int, update_transform);
                         }
                         Ok(())
@@ -611,6 +612,7 @@ impl ShellVariable {
                     } else {
                         new_value = existing_value.to_owned();
                         new_value.push_str(value.as_str());
+                        new_value = rawbytes::normalize(new_value);
                     }
 
                     arr.insert(key, new_value);
@@ -633,6 +635,7 @@ impl ShellVariable {
                     } else {
                         new_value = existing_value.to_owned();
                         new_value.push_str(value.as_str());
+                        new_value = rawbytes::normalize(new_value);
                     }
 
                     arr.insert(array_index, new_value.clone());
